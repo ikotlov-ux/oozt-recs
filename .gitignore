@@ -47,3 +47,6 @@ __pycache__/
 .venv/
 .DS_Store
 Thumbs.db
+
+# Локальный помощник выгрузки
+push_to_github.cmd
