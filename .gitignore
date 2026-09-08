@@ -1,0 +1,49 @@
+# Локальные конфигурации с абсолютными путями
+config_pc.json
+config_used.json
+config_local*.json
+
+# Данные
+data/
+*.shp
+*.shx
+*.dbf
+*.prj
+*.sbn
+*.sbx
+*.cpg
+*.qix
+*.gpkg
+*.tif
+*.tfw
+*.asc
+*.asc.aux.xml
+*.dxf
+*.dwg
+*.kml
+*.kmz
+
+# Результаты расчёта
+out/
+RECs*/
+report/
+*.xlsx
+*.csv
+*.pdf
+*.pptx
+*.docx
+*.png
+*.jpg
+*.jpeg
+
+# Логи и служебные файлы
+*.log
+run_*.txt
+tmp/
+pylib/
+.ipynb_checkpoints/
+__pycache__/
+*.pyc
+.venv/
+.DS_Store
+Thumbs.db
