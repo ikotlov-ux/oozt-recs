@@ -1,0 +1,51 @@
+{
+  "measures_xlsx": "data/measures_by_prikaz.xlsx",
+  "unit_mode": "eco",
+  "oozt_path": "data/vec/ecosystems.gpkg",
+  "oozt_layer": "ecosystems",
+  "oozt_name": "Измайлово",
+  "report_group_field": null,
+  "sheet_size_m": 1000.0,
+  "dem_path": "data/ras/DEM.tif",
+  "trails": [
+    "data/vec/osm-highway-line.shp"
+  ],
+  "hydro_lines": [
+    "data/vec/osm-hydroline.shp"
+  ],
+  "hydro_polys": [
+    "data/vec/osm-hydropoly.shp"
+  ],
+  "invasive_points": [
+    "data/vec/vascular_invasive.shp"
+  ],
+  "invasive_polys": [],
+  "invasive_rasters": [
+    "data/ras/Ambrosia_artemisiifolia.asc",
+    "data/ras/Heracleum_sosnowskyi.asc",
+    "data/ras/Impatiens_glandulifera.asc",
+    "data/ras/Reynoutria_sp.asc",
+    "data/ras/Solidago_canadensis.asc",
+    "data/ras/Solidago_gigantea.asc"
+  ],
+  "rare_points": [
+    "data/vec/vascular_rare.shp"
+  ],
+  "rare_polys": [],
+  "rare_rasters": [
+    "data/ras/Anemonoides_nemorosa.tif",
+    "data/ras/Corydalis_cava.tif",
+    "data/ras/Pulmonaria_obscura.tif"
+  ],
+  "fauna_points": [
+    "data/vec/aves.shp"
+  ],
+  "out_dir": "out",
+  "report_kv": [],
+  "basemap": true,
+  "fields": {
+    "ID": "eco_id",
+    "TYPE": "Type",
+    "NAME": "Name"
+  }
+}

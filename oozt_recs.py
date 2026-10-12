@@ -1,24 +1,32 @@
 # -*- coding: utf-8 -*-
 """
 oozt_recs.py — подготовка природоохранных рекомендаций (мероприятий) для ООЗТ Москвы
-по кварталам и выделам на основе ГИС-слоёв и таблицы «Мероприятия по Приказу».
+на основе ГИС-слоёв и таблицы «Мероприятия по Приказу».
+
+Единицы назначения мероприятий (режим выбирается в окне или ключом unit_mode в конфигурации)
+--------------------------------------------------------------------------------------------
+    kv_vyd — кварталы и выделы: поля ООЗТ, квартала, выдела, типа; отчёт и схемы — по кварталам;
+    eco    — слой экосистем с уникальным ID, без кварталов: поля ID и типа (ООЗТ и название — по желанию);
+             отчёт и схемы — по листам регулярной сетки (sheet_size_m, по умолчанию 1000 м)
+             или по значениям поля группировки (report_group_field).
 
 Запуск
 ------
-    python oozt_recs.py                   # диалоговый режим (tkinter) — все пути выбираются в окнах
-    python oozt_recs.py --config cfg.json # повторный запуск с сохранённой конфигурацией, без диалогов
-    python oozt_recs.py --config cfg.json --kv 1,2,5   # отчёт только по выбранным кварталам
+    python oozt_recs.py                   # окно выбора данных: режим, слои, живая сводка мероприятий
+    python oozt_recs.py --config cfg.json # повторный запуск с сохранённой конфигурацией, без окна
+    python oozt_recs.py --config cfg.json --gui        # окно, предзаполненное из конфигурации
+    python oozt_recs.py --config cfg.json --kv 1,2,5   # отчёт только по выбранным кварталам / листам
 
 Выходные данные (папка out_dir)
 -------------------------------
-    measures_long.xlsx / .csv   — длинная таблица ООЗТ–Квартал–Выдел–Мероприятие (+ основание)
-    measures_by_vydel.xlsx      — сводка: одна строка на выдел, мероприятия через «; »
-    evidence.gpkg               — слои-основания (точки/линии/полигоны) + выделы с мероприятиями
-    report/report.md            — отчёт по кварталам (схема + таблица), рисунки report/fig_kv_*.png
+    measures_long.xlsx / .csv   — длинная таблица ООЗТ–Квартал(Лист)–Выдел(ID)–Мероприятие (+ основание)
+    evidence.gpkg               — слои-основания + полигоны с мероприятиями (vydel_measures / eco_measures)
+    report/report.md            — отчёт по кварталам или листам (схема + таблицы), рисунки report/fig_*.png
     config_used.json            — конфигурация запуска (можно передать в --config)
+    run.log                     — журнал, в начале — статус каждого мероприятия при выбранных данных
 
-Правила (ключ Метод выявления в Excel → расчёт) описаны в разделе RULES.
-Все входы, кроме таблицы мероприятий и слоя ООЗТ, опциональны.
+Правила (ключ Метод выявления в Excel → расчёт) — classify_measure() и раздел ПРАВИЛА;
+связь правил со слоями — RULE_REQS. Обязательны только таблица мероприятий и слой территории.
 """
 from __future__ import annotations
 
@@ -144,11 +152,21 @@ TYPE_NEARWATER = ("околовод", "болот")
 # =====================================================================================
 #                                   КОНФИГУРАЦИЯ
 # =====================================================================================
+UNIT_MODES = {
+    "kv_vyd": "Кварталы и выделы",
+    "eco": "Слой экосистем с уникальным ID (без кварталов)",
+}
+
+
 @dataclass
 class Config:
     measures_xlsx: str = ""
-    oozt_path: str = ""
+    unit_mode: str = "kv_vyd"            # kv_vyd — кварталы/выделы; eco — полигоны экосистем с уникальным ID
+    oozt_path: str = ""                  # слой единиц территории (выделы или экосистемы)
     oozt_layer: str | None = None
+    oozt_name: str = ""                  # eco: название ООЗТ, если в слое нет поля ООЗТ
+    report_group_field: str | None = None  # eco: поле группировки отчёта; пусто — листы регулярной сетки
+    sheet_size_m: float = 1000.0         # eco: размер листа сетки для схем, м
     dem_path: str | None = None
     trails: list[str] = field(default_factory=list)
     hydro_lines: list[str] = field(default_factory=list)
@@ -161,9 +179,9 @@ class Config:
     rare_rasters: list[str] = field(default_factory=list)
     fauna_points: list[str] = field(default_factory=list)     # птицы и др. (для Corvus)
     out_dir: str = ""
-    report_kv: list[int] = field(default_factory=list)        # пусто = все кварталы
+    report_kv: list = field(default_factory=list)   # кварталы / листы / группы для отчёта; пусто = все
     basemap: bool = True
-    fields: dict = field(default_factory=dict)                # {'OOZT':..,'KV':..,'VYD':..,'TYPE':..,'NAME':..}
+    fields: dict = field(default_factory=dict)      # kv_vyd: OOZT, KV, VYD, TYPE, NAME; eco: ID, TYPE, NAME, OOZT
 
     def save(self, path: str | Path):
         Path(path).write_text(json.dumps(asdict(self), ensure_ascii=False, indent=2), encoding="utf-8")
@@ -171,65 +189,771 @@ class Config:
     @staticmethod
     def load(path: str | Path) -> "Config":
         d = json.loads(Path(path).read_text(encoding="utf-8"))
-        return Config(**d)
+        known = set(Config.__dataclass_fields__)
+        return Config(**{k: v for k, v in d.items() if k in known})
+
+
+def unit_labels(cfg: Config) -> dict:
+    """Подписи территориальных единиц в таблицах, отчёте и на схемах (зависят от режима)."""
+    if cfg.unit_mode == "eco":
+        grp = cfg.report_group_field
+        return {
+            "group": grp if grp else "Лист", "group_pl": f"группам «{grp}»" if grp else "листам",
+            "groups_n": "Групп" if grp else "Листов",
+            "unit": "ID экосистемы", "units_n": "Экосистем", "units_gen": "экосистем",
+            "unit_type": "Тип полигона", "unit_name": "Экосистема",
+        }
+    return {"group": "Квартал", "group_pl": "кварталам", "groups_n": "Кварталов",
+            "unit": "Выдел", "units_n": "Выделов", "units_gen": "выделов",
+            "unit_type": "Тип выдела", "unit_name": "Экосистема выдела"}
+
+
+def display_columns(cfg: Config) -> dict:
+    """Внутренние имена колонок (Квартал/Выдел/Тип выдела) → подписи текущего режима."""
+    L = unit_labels(cfg)
+    return {"Квартал": L["group"], "Выдел": L["unit"], "Тип выдела": L["unit_type"]}
 
 
 # =====================================================================================
-#                               ДИАЛОГИ ВЫБОРА ФАЙЛОВ (tkinter)
+#                 ВХОДНЫЕ СЛОИ И ИХ СВЯЗЬ С МЕРОПРИЯТИЯМИ (для интерфейса и журнала)
+# =====================================================================================
+# key — поле Config; multi — можно выбрать несколько файлов
+LAYER_SPECS = [
+    dict(key="dem_path", title="Цифровая модель рельефа", multi=False, kind="ras",
+         what="растр высот, 1 канал (tif, asc); уклон считается на сетке 10 м"),
+    dict(key="trails", title="Дорожно-тропиночная сеть", multi=True, kind="vec",
+         what="линии; OSM highway (path, footway, track…) или полевая съёмка"),
+    dict(key="hydro_lines", title="Гидрография — линии", multi=True, kind="vec",
+         what="реки, ручьи, каналы"),
+    dict(key="hydro_polys", title="Гидрография — полигоны", multi=True, kind="vec",
+         what="пруды, озёра, водохранилища"),
+    dict(key="invasive_points", title="Инвазионные виды — точки", multi=True, kind="vec",
+         what="точки встреч; поле с латинским названием вида"),
+    dict(key="invasive_polys", title="Инвазионные виды — полигоны", multi=True, kind="vec",
+         what="контуры зарослей"),
+    dict(key="invasive_rasters", title="Инвазионные виды — модели SDM", multi=True, kind="ras",
+         what=f"растры вероятности 0–1; вид = имя файла; порог {SDM_THRESHOLD_INVASIVE:.2f}"),
+    dict(key="rare_points", title="Редкие виды — точки", multi=True, kind="vec",
+         what=f"точки встреч; буфер {RARE_BUFFER_M:.0f} м"),
+    dict(key="rare_polys", title="Редкие виды — полигоны", multi=True, kind="vec",
+         what="контуры местообитаний"),
+    dict(key="rare_rasters", title="Редкие виды — модели SDM", multi=True, kind="ras",
+         what=f"растры вероятности 0–1; вид = имя файла; порог {SDM_THRESHOLD_RARE:.2f}"),
+    dict(key="fauna_points", title="Фауна — точки наблюдений", multi=True, kind="vec",
+         what=f"наблюдения птиц; используется род Corvus, окно {CORVUS_WINDOW_M:.0f} м"),
+]
+LAYER_TITLE = {s["key"]: s["title"] for s in LAYER_SPECS}
+
+# правило → требования: список групп «хотя бы один слой из группы»; opt — улучшают результат
+RULE_REQS = {
+    "corvus": dict(label="плотность врановых (окно %.0f м, верхний квартиль)" % CORVUS_WINDOW_M,
+                   req=[["fauna_points"]], opt=[]),
+    "slope": dict(label="уклон по ЦМР", req=[["dem_path"]], opt=[]),
+    "invasive": dict(label="встречи и модели инвазионных видов",
+                     req=[["invasive_points", "invasive_polys", "invasive_rasters"]], opt=[]),
+    "rare": dict(label="тропы в зоне редких видов (буфер %.0f м)" % RARE_BUFFER_M,
+                 req=[["rare_points", "rare_polys", "rare_rasters"]], opt=["trails"]),
+    "shore": dict(label="тропы повышенной плотности у воды (%.0f м)" % SHORE_BUFFER_M,
+                  req=[["trails"], ["hydro_lines", "hydro_polys"]], opt=[]),
+    "trail_hotspot": dict(label="растровая плотность троп, окно %.0f м, верхний квартиль" % TRAIL_WINDOW_M,
+                          req=[["trails"]], opt=[]),
+    "trail_density": dict(label="плотность троп на полигон (м/га), верхний квартиль",
+                          req=[["trails"]], opt=[]),
+    "type": dict(label="по типу полигона", req=[], opt=[]),
+}
+
+
+def classify_measure(measure: dict) -> dict:
+    """Метод выявления → правило. Возвращает {'rule', 'params', 'reason'} (rule=None — не рассчитывается)."""
+    m = (measure.get("method") or "").lower()
+    nm = (measure.get("name") or "").lower()
+    if not m:
+        return dict(rule=None, params={}, reason="метод выявления не задан")
+    if "нет данных" in m:
+        return dict(rule=None, params={}, reason="по таблице: нет данных")
+    if "corvus" in m or "ворон" in nm:
+        return dict(rule="corvus", params={}, reason="")
+    if "уклон" in m or "цмр" in m:
+        mt = re.search(r"(\d+(?:[.,]\d+)?)\s*%", m)
+        thr = float(mt.group(1).replace(",", ".")) if mt else 7.0
+        keys = TYPE_MEADOW if "лугов" in m else None
+        if keys is None and "люб" in str(measure.get("eco", "")).lower():
+            thr = 7.0
+        return dict(rule="slope", params=dict(threshold_pct=thr, type_keys=keys), reason="")
+    if ("инвази" in m or "чужерод" in nm or "инвази" in nm) and "троп" not in m:
+        return dict(rule="invasive", params={}, reason="")
+    if "точек видов" in m or ("ликвидация троп" in m and "50" in m):
+        return dict(rule="rare", params={}, reason="")
+    if "периметр" in m or "берег" in nm or "водо" in m:
+        return dict(rule="shore", params={}, reason="")
+    if "скольз" in m and "троп" in m:
+        return dict(rule="trail_hotspot", params={}, reason="")
+    if "плотност" in m and ("дорог" in m or "троп" in m):
+        return dict(rule="trail_density", params={}, reason="")
+    if "лугов" in m:
+        return dict(rule="type", params=dict(keys=TYPE_MEADOW, label="луговые"), reason="")
+    if "околовод" in m:
+        return dict(rule="type", params=dict(keys=TYPE_WATER + TYPE_NEARWATER, label="водные и околоводные"),
+                    reason="")
+    if "водн" in m:
+        return dict(rule="type", params=dict(keys=TYPE_WATER, label="водные"), reason="")
+    if "лесн" in m:
+        return dict(rule="type", params=dict(keys=TYPE_FOREST, label="лесные"), reason="")
+    return dict(rule=None, params={}, reason="метод не распознан")
+
+
+def _cfg_has(cfg: Config, key: str) -> bool:
+    v = getattr(cfg, key, None)
+    return bool(v) if not isinstance(v, list) else len(v) > 0
+
+
+def measure_status(measure: dict, cfg: Config, type_counts: dict | None = None) -> dict:
+    """Статус мероприятия при текущем наборе данных: ok / missing / off / na (+ текст и нужные слои)."""
+    c = classify_measure(measure)
+    rule = c["rule"]
+    need = []
+    if rule:
+        need = [" или ".join(LAYER_TITLE[k] for k in grp) for grp in RULE_REQS[rule]["req"]]
+        if rule == "type" or (rule == "slope" and c["params"].get("type_keys")) or rule in (
+                "trail_density", "trail_hotspot", "corvus"):
+            need.append("поле типа в слое территории")
+    need_txt = "; ".join(need) if need else "только слой территории"
+    if not measure.get("on"):
+        return dict(state="off", text="выключено в таблице", need=need_txt, rule=rule)
+    if rule is None:
+        return dict(state="na", text=c["reason"], need="—", rule=None)
+    missing = [grp for grp in RULE_REQS[rule]["req"] if not any(_cfg_has(cfg, k) for k in grp)]
+    if missing:
+        txt = "не хватает: " + "; ".join(" или ".join(LAYER_TITLE[k] for k in grp) for grp in missing)
+        return dict(state="missing", text=txt, need=need_txt, rule=rule)
+    txt = "будет рассчитано"
+    keys = c["params"].get("keys") or c["params"].get("type_keys") or (
+        TYPE_FOREST if rule in ("trail_density", "trail_hotspot", "corvus") else None)
+    if keys and type_counts is not None:
+        n = sum(v for t, v in type_counts.items() if any(k in str(t).lower() for k in keys))
+        if n == 0:
+            return dict(state="missing", text="в слое нет полигонов типа «%s»" % "/".join(keys),
+                        need=need_txt, rule=rule)
+        txt += f" ({n} полигонов типа «{'/'.join(keys)}»)"
+    if rule == "rare" and not cfg.trails:
+        txt += " — без троп: по самим зонам видов"
+    return dict(state="ok", text=txt, need=need_txt, rule=rule)
+
+
+# =====================================================================================
+#                       ОКНО ВЫБОРА ИСХОДНЫХ ДАННЫХ (tkinter, одно окно)
 # =====================================================================================
 VEC_TYPES = [("Векторные данные", "*.shp *.gpkg *.geojson *.json *.kml *.dxf *.gml"), ("Все файлы", "*.*")]
 RAS_TYPES = [("Растры", "*.tif *.tiff *.asc *.img *.vrt"), ("Все файлы", "*.*")]
 XLS_TYPES = [("Excel", "*.xlsx *.xlsm *.xls"), ("Все файлы", "*.*")]
+JSON_TYPES = [("Конфигурация", "*.json"), ("Все файлы", "*.*")]
+NONE_FIELD = "— нет —"
+
+# поля слоя территории: ключ, подпись, обязательность, кандидаты для автоподбора
+FIELD_SPECS = {
+    "kv_vyd": [
+        ("OOZT", "ООЗТ", True, ["OOZT", "ООЗТ", "Name_OOZT"]),
+        ("KV", "Квартал", True, ["KV", "FID_kv", "kv", "Квартал", "kvartal"]),
+        ("VYD", "Выдел", True, ["VYD", "FID_ecosys", "vyd", "Выдел", "vydel"]),
+        ("TYPE", "Тип (лес / луг / водные / околоводные)", True, ["Type", "TYPE", "Тип"]),
+        ("NAME", "Название экосистемы", False, ["Name", "NAME", "Название", "Ecosystem"]),
+    ],
+    "eco": [
+        ("ID", "Уникальный ID экосистемы", True, ["ID", "Id", "id", "eco_id", "ECO_ID", "uid", "UID",
+                                                  "FID_ecosys", "fid_1"]),
+        ("TYPE", "Тип (лес / луг / водные / околоводные)", True, ["Type", "TYPE", "Тип"]),
+        ("NAME", "Название экосистемы", False, ["Name", "NAME", "Название", "Ecosystem"]),
+        ("OOZT", "ООЗТ (если поля нет — название ниже)", False, ["OOZT", "ООЗТ", "Name_OOZT"]),
+    ],
+}
 
 
-def gui_collect_config() -> Config:
-    import tkinter as tk
-    from tkinter import filedialog, messagebox, simpledialog
+def _vector_fields(path: str, layer: str | None):
+    """Имена полей и таблица атрибутов (без геометрии) — для подбора полей в интерфейсе."""
+    df = pyogrio.read_dataframe(path, layer=layer, read_geometry=False)
+    ren = {c: _remojibake(c) for c in df.columns}
+    ren = {k: v for k, v in ren.items() if v != k and v not in df.columns}
+    if ren:
+        df = df.rename(columns=ren)
+    return list(df.columns), df
 
-    root = tk.Tk()
-    root.withdraw()
-    root.attributes("-topmost", True)
-    cfg = Config()
 
-    def one(title, types, required=False):
-        while True:
-            p = filedialog.askopenfilename(title=title, filetypes=types)
-            if p or not required:
-                return p or None
-            messagebox.showwarning("Обязательный файл", f"Нужно выбрать: {title}")
+class SetupWindow:
+    """Одно окно: режим территории, обязательные и тематические слои, живая сводка мероприятий."""
 
-    def many(title, types):
-        ps = filedialog.askopenfilenames(title=title + "  (можно несколько; Отмена = пропустить)", filetypes=types)
-        return list(ps) if ps else []
+    C_OK, C_WARN, C_OFF, C_MUTED = "#2E7D32", "#B35C00", "#8A8A8A", "#5F6368"
 
-    cfg.measures_xlsx = one("1/12  Таблица мероприятий (Excel «Мероприятия по Приказу»)", XLS_TYPES, required=True)
-    cfg.oozt_path = one("2/12  Слой ООЗТ с кварталами и выделами", VEC_TYPES, required=True)
-    if cfg.oozt_path.lower().endswith(".gpkg"):
-        layers = [l[0] for l in pyogrio.list_layers(cfg.oozt_path)]
-        if len(layers) > 1:
-            cfg.oozt_layer = simpledialog.askstring("Слой GPKG", "Имя слоя ООЗТ:\n" + "\n".join(layers),
-                                                    initialvalue=layers[0])
+    def __init__(self, cfg: Config | None = None):
+        import tkinter as tk
+        from tkinter import ttk, font as tkfont
+        self.tk, self.ttk = tk, ttk
+        if os.name == "nt":
+            try:
+                import ctypes
+                ctypes.windll.shcore.SetProcessDpiAwareness(1)
+            except Exception:
+                pass
+        self.root = tk.Tk()
+        self.root.title("ООЗТ: природоохранные мероприятия — исходные данные")
+        self.root.geometry("1480x900")
+        self.root.minsize(1180, 700)
+        self.cfg = cfg or Config()
+        self.result: Config | None = None
+        self.measures: list[dict] = []
+        self.type_counts: dict | None = None
+        self.attr_df = None
+        self.field_vars: dict = {}
+        self.layer_rows: dict = {}
+
+        fam = "Segoe UI" if os.name == "nt" else ("Noto Sans" if "Noto Sans" in tkfont.families() else None)
+        for fn in ("TkDefaultFont", "TkTextFont", "TkHeadingFont", "TkMenuFont", "TkCaptionFont"):
+            try:
+                f_ = tkfont.nametofont(fn)
+                f_.configure(size=10, **({"family": fam} if fam else {}))
+            except Exception:
+                pass
+        base = tkfont.nametofont("TkDefaultFont")
+        self.f_bold = base.copy(); self.f_bold.configure(weight="bold")
+        self.f_small = base.copy(); self.f_small.configure(size=9)
+        self.f_head = base.copy(); self.f_head.configure(size=13, weight="bold")
+
+        st = ttk.Style(self.root)
+        st.configure("Treeview", rowheight=24)
+        # обход ошибки Tk 8.6.9: цвета тегов Treeview не применяются
+        def _fixed(opt):
+            return [e for e in st.map("Treeview", query_opt=opt) if e[:2] != ("!disabled", "!selected")]
+        st.map("Treeview", foreground=_fixed("foreground"), background=_fixed("background"))
+
+        self._build()
+        self._load_from_cfg(self.cfg)
+
+    # ------------------------------------------------------------------ разметка
+    def _build(self):
+        tk, ttk = self.tk, self.ttk
+        top = ttk.Frame(self.root, padding=(12, 10, 12, 4))
+        top.pack(fill="x")
+        ttk.Label(top, text="Исходные данные для расчёта мероприятий", font=self.f_head).pack(anchor="w")
+        ttk.Label(top, foreground=self.C_MUTED, text=(
+            "Обязательны таблица мероприятий и слой территории. Остальные слои необязательны: справа видно, "
+            "какие мероприятия будут рассчитаны при выбранном наборе данных и чего не хватает остальным.")
+        ).pack(anchor="w")
+
+        pw = ttk.PanedWindow(self.root, orient="horizontal")
+        pw.pack(fill="both", expand=True, padx=12, pady=6)
+
+        # ---- левая колонка (прокручиваемая)
+        left_outer = ttk.Frame(pw)
+        canvas = tk.Canvas(left_outer, highlightthickness=0, borderwidth=0)
+        vsb = ttk.Scrollbar(left_outer, orient="vertical", command=canvas.yview)
+        self.left = ttk.Frame(canvas)
+        self.left.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+        win = canvas.create_window((0, 0), window=self.left, anchor="nw")
+        canvas.bind("<Configure>", lambda e: canvas.itemconfigure(win, width=e.width))
+        canvas.configure(yscrollcommand=vsb.set)
+        canvas.pack(side="left", fill="both", expand=True)
+        vsb.pack(side="right", fill="y")
+        canvas.bind_all("<MouseWheel>", lambda e: canvas.yview_scroll(int(-e.delta / 120), "units"))
+        canvas.bind_all("<Button-4>", lambda e: canvas.yview_scroll(-2, "units"))
+        canvas.bind_all("<Button-5>", lambda e: canvas.yview_scroll(2, "units"))
+        pw.add(left_outer, weight=5)
+
+        # 1. таблица мероприятий
+        s1 = ttk.LabelFrame(self.left, text=" 1. Таблица мероприятий (обязательно) ", padding=8)
+        s1.pack(fill="x", pady=(0, 8))
+        self.v_xlsx = tk.StringVar()
+        r = ttk.Frame(s1); r.pack(fill="x")
+        ttk.Entry(r, textvariable=self.v_xlsx, state="readonly").pack(side="left", fill="x", expand=True)
+        ttk.Button(r, text="Выбрать…", command=self._pick_xlsx).pack(side="left", padx=(6, 0))
+        self.l_xlsx = ttk.Label(s1, foreground=self.C_MUTED, font=self.f_small,
+                                text="Excel «Мероприятия по Приказу»: колонки «Мероприятия», «Вкл/выкл», «Метод выявления»")
+        self.l_xlsx.pack(anchor="w", pady=(4, 0))
+
+        # 2. слой территории
+        s2 = ttk.LabelFrame(self.left, text=" 2. Слой территории — единицы назначения мероприятий (обязательно) ",
+                            padding=8)
+        s2.pack(fill="x", pady=(0, 8))
+        self.v_mode = tk.StringVar(value="kv_vyd")
+        mf = ttk.Frame(s2); mf.pack(fill="x")
+        ttk.Radiobutton(mf, text="Кварталы и выделы", value="kv_vyd", variable=self.v_mode,
+                        command=self._on_mode).grid(row=0, column=0, sticky="w")
+        ttk.Label(mf, foreground=self.C_MUTED, font=self.f_small,
+                  text="полигоны выделов с полями ООЗТ, квартала и выдела; отчёт и схемы — по кварталам"
+                  ).grid(row=1, column=0, sticky="w", padx=(24, 0))
+        ttk.Radiobutton(mf, text="Слой экосистем с уникальным ID (без кварталов)", value="eco",
+                        variable=self.v_mode, command=self._on_mode).grid(row=2, column=0, sticky="w", pady=(4, 0))
+        ttk.Label(mf, foreground=self.C_MUTED, font=self.f_small,
+                  text="полигоны экосистем; отчёт и схемы — по листам регулярной сетки или по полю группировки"
+                  ).grid(row=3, column=0, sticky="w", padx=(24, 0))
+
+        self.v_oozt = tk.StringVar()
+        r = ttk.Frame(s2); r.pack(fill="x", pady=(8, 0))
+        ttk.Label(r, text="Файл:", width=8).pack(side="left")
+        ttk.Entry(r, textvariable=self.v_oozt, state="readonly").pack(side="left", fill="x", expand=True)
+        ttk.Button(r, text="Выбрать…", command=self._pick_oozt).pack(side="left", padx=(6, 0))
+        r = ttk.Frame(s2); r.pack(fill="x", pady=(4, 0))
+        ttk.Label(r, text="Слой GPKG:", width=11).pack(side="left")
+        self.v_layer = tk.StringVar()
+        self.cb_layer = ttk.Combobox(r, textvariable=self.v_layer, state="disabled", width=40)
+        self.cb_layer.pack(side="left")
+        self.cb_layer.bind("<<ComboboxSelected>>", lambda e: self._read_oozt_fields())
+
+        self.fields_frame = ttk.Frame(s2)
+        self.fields_frame.pack(fill="x", pady=(8, 0))
+        self.eco_frame = ttk.Frame(s2)
+        self.v_oozt_name = tk.StringVar()
+        self.v_group = tk.StringVar(value=NONE_FIELD)
+        self.v_sheet = tk.StringVar(value="1000")
+        ttk.Label(self.eco_frame, text="Название ООЗТ:").grid(row=0, column=0, sticky="w")
+        ttk.Entry(self.eco_frame, textvariable=self.v_oozt_name, width=30).grid(row=0, column=1, sticky="w", padx=6)
+        ttk.Label(self.eco_frame, foreground=self.C_MUTED, font=self.f_small,
+                  wraplength=300, justify="left", text="используется, если поле ООЗТ не выбрано").grid(row=0, column=2, sticky="w")
+        ttk.Label(self.eco_frame, text="Группировка отчёта:").grid(row=1, column=0, sticky="w", pady=(4, 0))
+        self.cb_group = ttk.Combobox(self.eco_frame, textvariable=self.v_group, state="readonly", width=28)
+        self.cb_group.grid(row=1, column=1, sticky="w", padx=6, pady=(4, 0))
+        self.cb_group.bind("<<ComboboxSelected>>", lambda e: self._refresh())
+        ttk.Label(self.eco_frame, foreground=self.C_MUTED, font=self.f_small,
+                  wraplength=300, justify="left", text="поле (например, участок или район); «нет» — листы регулярной сетки"
+                  ).grid(row=1, column=2, sticky="w")
+        ttk.Label(self.eco_frame, text="Размер листа, м:").grid(row=2, column=0, sticky="w", pady=(4, 0))
+        ttk.Spinbox(self.eco_frame, from_=200, to=5000, increment=100, textvariable=self.v_sheet, width=8,
+                    command=self._refresh).grid(row=2, column=1, sticky="w", padx=6, pady=(4, 0))
+        ttk.Label(self.eco_frame, foreground=self.C_MUTED, font=self.f_small,
+                  wraplength=300, justify="left", text="лист = квадрат сетки; полигон относится к листу по своей внутренней точке"
+                  ).grid(row=2, column=2, sticky="w")
+        self.l_types = ttk.Label(s2, foreground=self.C_MUTED, font=self.f_small, wraplength=700, justify="left")
+        self.l_types.pack(anchor="w", pady=(6, 0))
+
+        # 3. тематические слои
+        s3 = ttk.LabelFrame(self.left, text=" 3. Тематические слои (необязательно) ", padding=8)
+        s3.pack(fill="x", pady=(0, 8))
+        ttk.Label(s3, foreground=self.C_MUTED, font=self.f_small, wraplength=700, justify="left",
+                  text="✔ — слой выбран;  ! — нужен включённым мероприятиям, но не выбран;  ○ — не используется "
+                       "включёнными мероприятиями. Коды мероприятий — по таблице (колонка с номерами I.1, II.1…).",
+                  ).pack(anchor="w", pady=(0, 4))
+        for spec in LAYER_SPECS:
+            self._layer_row(s3, spec)
+
+        # ---- правая колонка
+        right = ttk.Frame(pw, padding=(8, 0, 0, 0))
+        pw.add(right, weight=4)
+        self._pw = pw
+        self.root.bind("<Map>", self._place_sash, add="+")
+        s4 = ttk.LabelFrame(right, text=" 4. Что будет рассчитано ", padding=8)
+        s4.pack(fill="both", expand=True)
+        self.l_sum = ttk.Label(s4, font=self.f_bold, text="Выберите таблицу мероприятий")
+        self.l_sum.pack(anchor="w", pady=(0, 6))
+        tf = ttk.Frame(s4); tf.pack(fill="both", expand=True)
+        cols = ("code", "name", "status")
+        self.tree = ttk.Treeview(tf, columns=cols, show="headings", selectmode="browse")
+        for c, t, w, st in (("code", "Код", 60, False), ("name", "Мероприятие", 300, True),
+                            ("status", "Статус при выбранных данных", 300, True)):
+            self.tree.heading(c, text=t, anchor="w")
+            self.tree.column(c, width=w, stretch=st, anchor="w")
+        self.tree.tag_configure("ok", foreground=self.C_OK)
+        self.tree.tag_configure("missing", foreground=self.C_WARN)
+        self.tree.tag_configure("off", foreground=self.C_OFF)
+        self.tree.tag_configure("na", foreground=self.C_OFF)
+        ys = ttk.Scrollbar(tf, orient="vertical", command=self.tree.yview)
+        self.tree.configure(yscrollcommand=ys.set)
+        self.tree.pack(side="left", fill="both", expand=True)
+        ys.pack(side="right", fill="y")
+        self.tree.bind("<<TreeviewSelect>>", self._on_select)
+        self.detail = tk.Text(s4, height=6, wrap="word", relief="flat", background="#F4F5F6",
+                              font=self.f_small, padx=6, pady=4)
+        self.detail.pack(fill="x", pady=(6, 0))
+        self.detail.insert("1.0", "Выберите мероприятие в списке, чтобы увидеть метод выявления и нужные слои.")
+        self.detail.configure(state="disabled")
+
+        s5 = ttk.LabelFrame(right, text=" 5. Результаты ", padding=8)
+        s5.pack(fill="x", pady=(8, 0))
+        self.v_out = tk.StringVar()
+        r = ttk.Frame(s5); r.pack(fill="x")
+        ttk.Label(r, text="Папка:", width=8).pack(side="left")
+        ttk.Entry(r, textvariable=self.v_out).pack(side="left", fill="x", expand=True)
+        ttk.Button(r, text="Выбрать…", command=self._pick_out).pack(side="left", padx=(6, 0))
+        r = ttk.Frame(s5); r.pack(fill="x", pady=(6, 0))
+        self.l_kv = ttk.Label(r, text="Кварталы для отчёта:", width=22)
+        self.l_kv.pack(side="left")
+        self.v_kv = tk.StringVar()
+        ttk.Entry(r, textvariable=self.v_kv, width=30).pack(side="left")
+        ttk.Label(r, foreground=self.C_MUTED, font=self.f_small, text="  через запятую; пусто — все").pack(side="left")
+        self.v_basemap = tk.BooleanVar(value=True)
+        ttk.Checkbutton(s5, text="Подложка OpenStreetMap на схемах (нужен интернет)",
+                        variable=self.v_basemap).pack(anchor="w", pady=(6, 0))
+
+        # ---- кнопки
+        bot = ttk.Frame(self.root, padding=(12, 4, 12, 12))
+        bot.pack(fill="x")
+        ttk.Button(bot, text="Загрузить конфигурацию…", command=self._load_cfg_file).pack(side="left")
+        ttk.Button(bot, text="Сохранить конфигурацию…", command=self._save_cfg_file).pack(side="left", padx=6)
+        ttk.Button(bot, text="Отмена", command=self._cancel).pack(side="right")
+        ttk.Button(bot, text="Запустить расчёт", command=self._run).pack(side="right", padx=6)
+        self.root.protocol("WM_DELETE_WINDOW", self._cancel)
+
+    def _place_sash(self, _e=None):
+        if getattr(self, "_sash_done", False):
+            return
+        self.root.update_idletasks()
+        w = self._pw.winfo_width()
+        if w > 100:
+            self._pw.sashpos(0, int(w * 0.53))
+            self._sash_done = True
+
+    def _layer_row(self, parent, spec):
+        ttk = self.ttk
+        key = spec["key"]
+        card = ttk.Frame(parent, padding=(0, 5, 0, 5))
+        card.pack(fill="x")
+        ttk.Separator(parent, orient="horizontal").pack(fill="x")
+        card.columnconfigure(1, weight=1)
+        st = ttk.Label(card, text="○", width=2, foreground=self.C_OFF, font=self.f_bold)
+        st.grid(row=0, column=0, sticky="w")
+        ttk.Label(card, text=spec["title"], font=self.f_bold).grid(row=0, column=1, sticky="w")
+        bf = ttk.Frame(card)
+        bf.grid(row=0, column=2, rowspan=2, sticky="ne")
+        ttk.Button(bf, text="Добавить…" if spec["multi"] else "Выбрать…", width=11,
+                   command=lambda s_=spec: self._pick_layer(s_)).pack(side="left")
+        ttk.Button(bf, text="Очистить", width=9, command=lambda k=key: self._clear_layer(k)).pack(side="left", padx=(4, 0))
+        ttk.Label(card, text=spec["what"] + ("; можно несколько файлов" if spec["multi"] else ""),
+                  foreground=self.C_MUTED, font=self.f_small, wraplength=520, justify="left"
+                  ).grid(row=1, column=1, sticky="w")
+        used = ttk.Label(card, text="", font=self.f_small, wraplength=640, justify="left")
+        used.grid(row=2, column=1, columnspan=2, sticky="w")
+        files = ttk.Label(card, text="не выбран", foreground=self.C_OFF, font=self.f_small,
+                          wraplength=640, justify="left")
+        files.grid(row=3, column=1, columnspan=2, sticky="w")
+        self.layer_rows[key] = dict(status=st, used=used, files=files, spec=spec)
+
+    # ------------------------------------------------------------------ выбор файлов
+    def _ask(self, kind, multi, title):
+        from tkinter import filedialog
+        types = {"vec": VEC_TYPES, "ras": RAS_TYPES, "xls": XLS_TYPES}[kind]
+        if multi:
+            return list(filedialog.askopenfilenames(parent=self.root, title=title, filetypes=types))
+        p = filedialog.askopenfilename(parent=self.root, title=title, filetypes=types)
+        return [p] if p else []
+
+    def _pick_xlsx(self):
+        ps = self._ask("xls", False, "Таблица мероприятий (Excel)")
+        if ps:
+            self.cfg.measures_xlsx = ps[0]
+            self._read_measures()
+            self._refresh()
+
+    def _pick_oozt(self):
+        ps = self._ask("vec", False, "Слой территории: " + UNIT_MODES[self.v_mode.get()])
+        if not ps:
+            return
+        self.cfg.oozt_path = ps[0]
+        self.cfg.oozt_layer = None
+        if not self.v_out.get():
+            self.v_out.set(str(Path(ps[0]).parent / "oozt_recs_out"))
+        self._setup_layer_combo()
+        self._read_oozt_fields()
+
+    def _pick_layer(self, spec):
+        ps = self._ask(spec["kind"], spec["multi"], spec["title"] + (" — можно выбрать несколько" if spec["multi"] else ""))
+        if not ps:
+            return
+        if spec["multi"]:
+            cur = list(getattr(self.cfg, spec["key"]) or [])
+            setattr(self.cfg, spec["key"], cur + [p for p in ps if p not in cur])
         else:
-            cfg.oozt_layer = layers[0]
-    cfg.dem_path = one("3/12  ЦМР (tif, один слой высот) — Отмена = пропустить", RAS_TYPES)
-    cfg.trails = many("4/12  Дорожно-тропиночная сеть (линии)", VEC_TYPES)
-    cfg.hydro_lines = many("5/12  Гидрология — линии", VEC_TYPES)
-    cfg.hydro_polys = many("6/12  Гидрология — полигоны", VEC_TYPES)
-    cfg.invasive_points = many("7/12  Инвазионные виды — точки встреч", VEC_TYPES)
-    cfg.invasive_polys = many("8/12  Инвазионные виды — полигоны произрастания", VEC_TYPES)
-    cfg.invasive_rasters = many("9/12  Инвазионные виды — растры SDM (asc/tif)", RAS_TYPES)
-    cfg.rare_points = many("10/12  Редкие виды — точки встреч", VEC_TYPES)
-    cfg.rare_polys = many("10/12  Редкие виды — полигоны", VEC_TYPES)
-    cfg.rare_rasters = many("10/12  Редкие виды — растры SDM (asc/tif)", RAS_TYPES)
-    cfg.fauna_points = many("11/12  Фауна — точки встреч (птицы: для Corvus)", VEC_TYPES)
-    out = filedialog.askdirectory(title="12/12  Папка для результатов")
-    cfg.out_dir = out or str(Path(cfg.oozt_path).parent / "oozt_recs_out")
-    kv = simpledialog.askstring("Кварталы для отчёта",
-                                "Номера кварталов через запятую (пусто = все кварталы):") or ""
-    cfg.report_kv = [int(x) for x in re.findall(r"\d+", kv)]
-    cfg.basemap = messagebox.askyesno("Подложка", "Добавлять подложку OpenStreetMap на схемы? (нужен интернет)")
-    root.destroy()
-    return cfg
+            setattr(self.cfg, spec["key"], ps[0])
+        self._refresh()
+
+    def _clear_layer(self, key):
+        setattr(self.cfg, key, [] if isinstance(getattr(self.cfg, key), list) else None)
+        self._refresh()
+
+    def _pick_out(self):
+        from tkinter import filedialog
+        p = filedialog.askdirectory(parent=self.root, title="Папка для результатов")
+        if p:
+            self.v_out.set(p)
+
+    # ------------------------------------------------------------------ чтение входов
+    def _read_measures(self):
+        try:
+            self.measures = read_measures(self.cfg.measures_xlsx)
+            self.v_xlsx.set(self.cfg.measures_xlsx)
+            n_on = sum(m["on"] for m in self.measures)
+            self.l_xlsx.configure(foreground=self.C_OK,
+                                  text=f"✔ {len(self.measures)} мероприятий, включено (Вкл/выкл = 1): {n_on}")
+        except Exception as e:
+            self.measures = []
+            self.v_xlsx.set(self.cfg.measures_xlsx)
+            self.l_xlsx.configure(foreground=self.C_WARN, text=f"! таблица не прочитана: {e}")
+
+    def _setup_layer_combo(self):
+        self.v_oozt.set(self.cfg.oozt_path)
+        p = self.cfg.oozt_path or ""
+        if p.lower().endswith(".gpkg") and Path(p).exists():
+            layers = [l[0] for l in pyogrio.list_layers(p)]
+            self.cb_layer.configure(values=layers, state="readonly")
+            self.v_layer.set(self.cfg.oozt_layer if self.cfg.oozt_layer in layers else layers[0])
+        else:
+            self.cb_layer.configure(values=[], state="disabled")
+            self.v_layer.set("")
+
+    def _read_oozt_fields(self):
+        self.attr_df = None
+        cols = []
+        if self.cfg.oozt_path and Path(self.cfg.oozt_path).exists():
+            try:
+                cols, self.attr_df = _vector_fields(self.cfg.oozt_path, self.v_layer.get() or None)
+            except Exception as e:
+                self.l_types.configure(foreground=self.C_WARN, text=f"! слой не прочитан: {e}")
+        self.columns = cols
+        self._build_fields(guess=True)
+        self._refresh()
+
+    def _build_fields(self, guess=False):
+        ttk = self.ttk
+        for w in self.fields_frame.winfo_children():
+            w.destroy()
+        mode = self.v_mode.get()
+        cols = getattr(self, "columns", [])
+        prev = {k: v.get() for k, v in self.field_vars.items()}
+        self.field_vars = {}
+        ttk.Label(self.fields_frame, text="Поля слоя:", font=self.f_bold).grid(row=0, column=0, sticky="w")
+        for i, (key, label, req, cands) in enumerate(FIELD_SPECS[mode], start=1):
+            v = self.tk.StringVar()
+            values = cols if req else [NONE_FIELD] + cols
+            cur = (self.cfg.fields or {}).get(key) or prev.get(key)
+            if cur not in cols and guess:
+                cur = next((c for c in cands if c in cols), None) or next(
+                    (c for c in cols if c.lower() in [x.lower() for x in cands]), None)
+            v.set(cur if cur in cols else ("" if req else NONE_FIELD))
+            ttk.Label(self.fields_frame, text=label + (" *" if req else "")).grid(row=i, column=0, sticky="w", pady=1)
+            cb = ttk.Combobox(self.fields_frame, textvariable=v, values=values, state="readonly", width=26)
+            cb.grid(row=i, column=1, sticky="w", padx=6, pady=1)
+            cb.bind("<<ComboboxSelected>>", lambda e: self._refresh())
+            self.field_vars[key] = v
+        if mode == "eco":
+            self.eco_frame.pack(fill="x", pady=(6, 0), before=self.l_types)
+            self.cb_group.configure(values=[NONE_FIELD] + cols)
+            if self.v_group.get() not in [NONE_FIELD] + cols:
+                self.v_group.set(NONE_FIELD)
+        else:
+            self.eco_frame.pack_forget()
+
+    def _on_mode(self):
+        self.cfg.fields = {}
+        self._build_fields(guess=True)
+        self._refresh()
+
+    # ------------------------------------------------------------------ сводка
+    def _collect(self) -> Config:
+        c = self.cfg
+        c.unit_mode = self.v_mode.get()
+        c.oozt_layer = self.v_layer.get() or None
+        c.fields = {k: v.get() for k, v in self.field_vars.items() if v.get() and v.get() != NONE_FIELD}
+        c.oozt_name = self.v_oozt_name.get().strip()
+        g = self.v_group.get()
+        c.report_group_field = g if (c.unit_mode == "eco" and g and g != NONE_FIELD) else None
+        try:
+            c.sheet_size_m = max(50.0, float(str(self.v_sheet.get()).replace(",", ".")))
+        except ValueError:
+            c.sheet_size_m = 1000.0
+        c.out_dir = self.v_out.get().strip()
+        c.report_kv = [x.strip() for x in re.split(r"[,;\s]+", self.v_kv.get()) if x.strip()]
+        c.report_kv = [int(x) if x.isdigit() else x for x in c.report_kv]
+        c.basemap = bool(self.v_basemap.get())
+        return c
+
+    def _refresh(self):
+        cfg = self._collect()
+        L = unit_labels(cfg)
+        self.l_kv.configure(text=("Кварталы для отчёта:" if cfg.unit_mode != "eco" else
+                                  "Листы для отчёта:" if not cfg.report_group_field else f"{L['group']}: для отчёта"))
+        # типы полигонов
+        self.type_counts = None
+        tf = cfg.fields.get("TYPE")
+        if self.attr_df is not None and tf in self.attr_df.columns:
+            vc = self.attr_df[tf].map(_remojibake).astype(str).str.strip().value_counts()
+            self.type_counts = vc.to_dict()
+            known = (TYPE_FOREST + TYPE_MEADOW + TYPE_WATER + TYPE_NEARWATER)
+            parts, unk = [], []
+            for t, n in vc.items():
+                (parts if any(k in t.lower() for k in known) else unk).append(f"{t} — {n}")
+            txt = f"Полигонов: {len(self.attr_df)}. Типы, распознаваемые правилами: " + (", ".join(parts) or "нет")
+            if unk:
+                txt += ". Не используются правилами по типу: " + ", ".join(unk[:8])
+            idf = cfg.fields.get("ID")
+            if cfg.unit_mode == "eco" and idf in self.attr_df.columns:
+                dup = int(self.attr_df[idf].duplicated().sum())
+                txt += (f". ID уникальны." if dup == 0 else f". ! В поле ID {dup} повторов — ID должен быть уникальным.")
+            self.l_types.configure(foreground=self.C_WARN if (not parts or "!" in txt) else self.C_MUTED, text=txt)
+        elif self.attr_df is not None:
+            self.l_types.configure(foreground=self.C_WARN, text="! выберите поле типа полигона")
+        # тематические слои
+        need_by = {k: [] for k in self.layer_rows}
+        statuses = []
+        for m in self.measures:
+            s = measure_status(m, cfg, self.type_counts)
+            statuses.append(s)
+            if s["rule"]:
+                for grp in RULE_REQS[s["rule"]]["req"] + [RULE_REQS[s["rule"]]["opt"]]:
+                    for k in grp:
+                        need_by[k].append((m.get("code") or "?", m["on"]))
+        for key, row in self.layer_rows.items():
+            val = getattr(cfg, key)
+            files = val if isinstance(val, list) else ([val] if val else [])
+            codes_on = sorted(dict.fromkeys(c for c, on in need_by[key] if on), key=_code_key)
+            codes_off = sorted(dict.fromkeys(c for c, on in need_by[key] if not on and c not in codes_on), key=_code_key)
+            if not self.measures:
+                utxt = "Нужен для мероприятий: выберите таблицу мероприятий"
+            else:
+                utxt = "Нужен для включённых: " + (", ".join(codes_on) if codes_on else "—")
+                if codes_off:
+                    utxt += ";  выключенных: " + ", ".join(codes_off)
+            row["used"].configure(text=utxt, foreground="#202124" if codes_on else self.C_MUTED)
+            if files:
+                names = [Path(f.split("|")[0]).name for f in files]
+                row["files"].configure(foreground=self.C_OK,
+                                       text="Выбрано" + (f" ({len(files)})" if len(files) > 1 else "") + ": " +
+                                       ", ".join(names[:5]) + (" …" if len(names) > 5 else ""))
+                row["status"].configure(text="✔", foreground=self.C_OK)
+            else:
+                row["files"].configure(foreground=self.C_WARN if codes_on else self.C_OFF, text="Не выбран")
+                if codes_on:
+                    row["status"].configure(text="!", foreground=self.C_WARN)
+                else:
+                    row["status"].configure(text="○", foreground=self.C_OFF)
+        # таблица мероприятий
+        self.tree.delete(*self.tree.get_children())
+        icon = {"ok": "✔", "missing": "!", "off": "—", "na": "—"}
+        for i, (m, s) in enumerate(zip(self.measures, statuses)):
+            self.tree.insert("", "end", iid=str(i), tags=(s["state"],),
+                             values=(m.get("code", ""), m["name"], f"{icon[s['state']]} {s['text']}"))
+        self._statuses = statuses
+        if self.measures:
+            n_on = sum(m["on"] for m in self.measures)
+            n_ok = sum(s["state"] == "ok" for s in statuses)
+            n_miss = sum(s["state"] == "missing" for s in statuses)
+            self.l_sum.configure(text=f"Будет рассчитано {n_ok} из {n_on} включённых мероприятий"
+                                      + (f"; не хватает данных: {n_miss}" if n_miss else ""),
+                                 foreground=self.C_OK if n_miss == 0 else self.C_WARN)
+
+    def _on_select(self, _e=None):
+        sel = self.tree.selection()
+        if not sel:
+            return
+        i = int(sel[0])
+        m, s = self.measures[i], self._statuses[i]
+        rule = s["rule"]
+        lines = [f"{m.get('code', '')} {m['name']}".strip(),
+                 f"Пункт Приказа: {m.get('prikaz') or '—'};  тип экосистемы: {m.get('eco') or '—'};  "
+                 f"Вкл/выкл: {'1' if m['on'] else '0'}",
+                 f"Метод выявления (Excel): {m.get('method') or '—'}"]
+        if rule:
+            lines.append(f"Правило скрипта: {RULE_REQS[rule]['label']}")
+            lines.append(f"Нужные данные: {s['need']}")
+            if RULE_REQS[rule]["opt"]:
+                lines.append("Дополнительно используется: " + ", ".join(LAYER_TITLE[k] for k in RULE_REQS[rule]["opt"]))
+        lines.append(f"Статус: {s['text']}")
+        self.detail.configure(state="normal")
+        self.detail.delete("1.0", "end")
+        self.detail.insert("1.0", "\n".join(lines))
+        self.detail.configure(state="disabled")
+
+    # ------------------------------------------------------------------ конфигурация
+    def _load_from_cfg(self, cfg: Config):
+        self.cfg = cfg
+        self.v_mode.set(cfg.unit_mode if cfg.unit_mode in UNIT_MODES else "kv_vyd")
+        self.v_oozt_name.set(cfg.oozt_name or "")
+        self.v_group.set(cfg.report_group_field or NONE_FIELD)
+        self.v_sheet.set(str(int(cfg.sheet_size_m)) if cfg.sheet_size_m else "1000")
+        self.v_out.set(cfg.out_dir or "")
+        self.v_kv.set(", ".join(map(str, cfg.report_kv or [])))
+        self.v_basemap.set(bool(cfg.basemap))
+        self.field_vars = {}
+        if cfg.measures_xlsx:
+            self._read_measures()
+        self._setup_layer_combo()
+        if cfg.oozt_path and Path(cfg.oozt_path).exists():
+            try:
+                self.columns, self.attr_df = _vector_fields(cfg.oozt_path, self.v_layer.get() or None)
+            except Exception:
+                self.columns, self.attr_df = [], None
+        self._build_fields(guess=True)
+        self._refresh()
+
+    def _load_cfg_file(self):
+        from tkinter import filedialog, messagebox
+        p = filedialog.askopenfilename(parent=self.root, title="Конфигурация (json)", filetypes=JSON_TYPES)
+        if not p:
+            return
+        try:
+            self._load_from_cfg(Config.load(p))
+        except Exception as e:
+            messagebox.showerror("Конфигурация", f"Не удалось прочитать {p}:\n{e}", parent=self.root)
+
+    def _save_cfg_file(self):
+        from tkinter import filedialog
+        p = filedialog.asksaveasfilename(parent=self.root, title="Сохранить конфигурацию", defaultextension=".json",
+                                         filetypes=JSON_TYPES, initialfile="config_local.json")
+        if p:
+            self._collect().save(p)
+
+    def _validate(self) -> list[str]:
+        c = self._collect()
+        err = []
+        if not c.measures_xlsx or not self.measures:
+            err.append("не выбрана или не прочитана таблица мероприятий")
+        if not c.oozt_path:
+            err.append("не выбран слой территории")
+        for key, label, req, _ in FIELD_SPECS[c.unit_mode]:
+            if req and not c.fields.get(key):
+                err.append(f"не задано поле «{label}»")
+        if c.unit_mode == "eco" and not c.fields.get("OOZT") and not c.oozt_name:
+            err.append("укажите поле ООЗТ или название ООЗТ")
+        if c.unit_mode == "eco" and self.attr_df is not None and c.fields.get("ID") in self.attr_df.columns:
+            if self.attr_df[c.fields["ID"]].duplicated().any():
+                err.append("в поле ID экосистемы есть повторы")
+        if not c.out_dir:
+            err.append("не указана папка результатов")
+        return err
+
+    def _run(self):
+        from tkinter import messagebox
+        err = self._validate()
+        if err:
+            messagebox.showwarning("Не хватает данных", "• " + "\n• ".join(err), parent=self.root)
+            return
+        miss = [f"{m.get('code', '')} {m['name']}: {s['text']}" for m, s in zip(self.measures, self._statuses)
+                if s["state"] == "missing"]
+        if miss and not messagebox.askyesno(
+                "Часть мероприятий не будет рассчитана",
+                "Для этих включённых мероприятий не хватает данных:\n\n" + "\n".join(miss[:15]) +
+                ("\n…" if len(miss) > 15 else "") + "\n\nЗапустить расчёт без них?", parent=self.root):
+            return
+        self.result = self._collect()
+        self.root.destroy()
+
+    def _cancel(self):
+        self.result = None
+        self.root.destroy()
+
+    def show(self) -> Config | None:
+        self.root.mainloop()
+        return self.result
+
+
+def _code_key(code: str):
+    """Сортировка кодов вида «III.5»: римская часть, затем номер."""
+    rom = {"I": 1, "II": 2, "III": 3, "IV": 4, "V": 5, "VI": 6}
+    mt = re.match(r"^([IVX]+)\.(\d+)", str(code))
+    return (rom.get(mt.group(1), 99), int(mt.group(2))) if mt else (99, 0)
+
+
+def gui_collect_config(cfg: Config | None = None) -> Config:
+    res = SetupWindow(cfg).show()
+    if res is None:
+        print("Отменено пользователем")
+        sys.exit(0)
+    return res
 
 
 # =====================================================================================
@@ -533,11 +1257,24 @@ def upper_quantile_mask(density: np.ndarray, inside: np.ndarray, q=QUANTILE):
 # =====================================================================================
 #                                 КОНТЕКСТ ДАННЫХ
 # =====================================================================================
+def _maybe_int(sr: pd.Series) -> pd.Series:
+    """Номера кварталов/выделов/ID → Int64, если все значения целые; иначе — текст как есть."""
+    try:
+        num = pd.to_numeric(sr)
+        if (num.dropna() % 1 == 0).all():
+            return num.astype("Int64")
+    except (ValueError, TypeError):
+        pass
+    return sr.astype(str).str.strip()
+
+
 class Data:
     """Все загруженные слои в WORK_EPSG + служебные объекты."""
 
     def __init__(self, cfg: Config, oozt_only: bool = False):
+        global _CUR_CFG
         self.cfg = cfg
+        _CUR_CFG = cfg
         self.oozt = self._load_oozt()
         self.union = unary_union(self.oozt.geometry.values)
         self.bounds = tuple(self.oozt.total_bounds)
@@ -573,11 +1310,13 @@ class Data:
 
     # ---- ООЗТ ----
     def _load_oozt(self) -> gpd.GeoDataFrame:
-        g = read_vector(self.cfg.oozt_path, self.cfg.oozt_layer)
-        f = self.cfg.fields or {}
+        cfg = self.cfg
+        g = read_vector(cfg.oozt_path, cfg.oozt_layer)
+        g = g[g.geom_type.isin(["Polygon", "MultiPolygon"])].copy()
+        f = cfg.fields or {}
         cols = list(g.columns)
 
-        def pick(key, candidates):
+        def pick(key, candidates, required=True):
             if f.get(key) and f[key] in cols:
                 return f[key]
             for c in candidates:
@@ -586,30 +1325,89 @@ class Data:
             for c in cols:
                 if c.lower() in [x.lower() for x in candidates]:
                     return c
-            raise KeyError(f"В слое ООЗТ не найдено поле {key} (искал {candidates}); задайте cfg.fields['{key}']")
+            if required:
+                raise KeyError(f"В слое территории не найдено поле {key} (искал {candidates}); "
+                               f"задайте его в окне выбора или в cfg.fields['{key}']")
+            return None
 
-        self.F_OOZT = pick("OOZT", ["OOZT", "ООЗТ", "Name_OOZT"])
-        self.F_KV = pick("KV", ["KV", "FID_kv", "kv", "Квартал", "kvartal"])
-        self.F_VYD = pick("VYD", ["VYD", "FID_ecosys", "vyd", "Выдел", "vydel"])
-        self.F_TYPE = pick("TYPE", ["Type", "TYPE", "Тип"])
-        self.F_NAME = pick("NAME", ["Name", "NAME", "Название", "Ecosystem"])
-        self.cfg.fields = {"OOZT": self.F_OOZT, "KV": self.F_KV, "VYD": self.F_VYD,
-                           "TYPE": self.F_TYPE, "NAME": self.F_NAME}
-        g = g.rename(columns={self.F_OOZT: "OOZT", self.F_KV: "KV", self.F_VYD: "VYD",
-                              self.F_TYPE: "Type", self.F_NAME: "Name"})
-        for f in ("KV", "VYD"):
-            try:
-                g[f] = pd.to_numeric(g[f]).astype("Int64")
-            except (ValueError, TypeError):
-                pass                                  # оставляем как есть (текстовые номера)
+        spec = {k: (req, cands) for k, _, req, cands in FIELD_SPECS[cfg.unit_mode]}
+        if cfg.unit_mode == "eco":
+            self.F_ID = pick("ID", spec["ID"][1])
+            self.F_TYPE = pick("TYPE", spec["TYPE"][1])
+            self.F_NAME = pick("NAME", spec["NAME"][1], required=False)
+            self.F_OOZT = pick("OOZT", spec["OOZT"][1], required=False)
+            cfg.fields = {k: v for k, v in {"ID": self.F_ID, "TYPE": self.F_TYPE, "NAME": self.F_NAME,
+                                            "OOZT": self.F_OOZT}.items() if v}
+            if g[self.F_ID].duplicated().any():
+                dup = g.loc[g[self.F_ID].duplicated(keep=False), self.F_ID].astype(str).unique()[:10]
+                raise ValueError(f"Поле ID «{self.F_ID}» не уникально: повторы {', '.join(dup)}")
+            gf = cfg.report_group_field
+            if gf and gf not in cols:
+                raise KeyError(f"Поле группировки «{gf}» не найдено в слое территории")
+            grp_vals = g[gf].astype(str).str.strip().values if gf else None
+            g = g.drop(columns=[c for c in ("OOZT", "KV", "VYD", "Type", "Name", "KV_SORT")
+                                if c in cols and c not in (self.F_ID, self.F_TYPE, self.F_NAME, self.F_OOZT)])
+            if self.F_NAME:
+                g["Name"] = g[self.F_NAME]
+            if not self.F_OOZT:
+                g["OOZT"] = cfg.oozt_name or Path(cfg.oozt_path).stem
+            else:
+                g["OOZT"] = g[self.F_OOZT].astype(str).str.strip()
+            g["VYD"] = g[self.F_ID]
+            g["Type"] = g[self.F_TYPE]
+            if not self.F_NAME:
+                g["Name"] = g["Type"]
+            g["KV"], g["KV_SORT"] = self._report_groups(g, grp_vals)
+        else:
+            self.F_OOZT = pick("OOZT", spec["OOZT"][1])
+            self.F_KV = pick("KV", spec["KV"][1])
+            self.F_VYD = pick("VYD", spec["VYD"][1])
+            self.F_TYPE = pick("TYPE", spec["TYPE"][1])
+            self.F_NAME = pick("NAME", spec["NAME"][1], required=False)
+            cfg.fields = {k: v for k, v in {"OOZT": self.F_OOZT, "KV": self.F_KV, "VYD": self.F_VYD,
+                                            "TYPE": self.F_TYPE, "NAME": self.F_NAME}.items() if v}
+            g = g.rename(columns={self.F_OOZT: "OOZT", self.F_KV: "KV", self.F_VYD: "VYD",
+                                  self.F_TYPE: "Type", **({self.F_NAME: "Name"} if self.F_NAME else {})})
+            if not self.F_NAME:
+                g["Name"] = g["Type"]
+        for c in ("KV", "VYD"):
+            g[c] = _maybe_int(g[c])
+        if cfg.unit_mode != "eco":
+            g["KV_SORT"] = g["KV"]
         g["Type"] = g["Type"].astype(str).str.strip()
         g["Name"] = g["Name"].astype(str).str.strip()
         g["uid"] = g["OOZT"].astype(str) + "|" + g["KV"].astype(str) + "|" + g["VYD"].astype(str)
         g["area_ha"] = g.geometry.area / 1e4
         g = g.reset_index(drop=True)
-        log.info("ООЗТ: %d выделов, %d кварталов, ООЗТ: %s", len(g), g["KV"].nunique(),
+        L = unit_labels(cfg)
+        log.info("Слой территории (%s): %d %s, %s: %d, ООЗТ: %s", UNIT_MODES[cfg.unit_mode], len(g),
+                 L["units_gen"], L["groups_n"].lower(), g["KV"].nunique(),
                  ", ".join(map(str, g["OOZT"].unique())))
         return g
+
+    def _report_groups(self, g: gpd.GeoDataFrame, grp_vals=None):
+        """Режим eco: группа отчёта — значение поля группировки или лист регулярной сетки (A1, A2, …)."""
+        cfg = self.cfg
+        self.sheet_grid = None
+        if grp_vals is not None:
+            return grp_vals, grp_vals
+        size = float(cfg.sheet_size_m or 1000.0)
+        minx, miny, maxx, maxy = g.total_bounds
+        pts = g.geometry.representative_point()
+        col = np.floor((pts.x.values - minx) / size).astype(int)
+        row = np.floor((maxy - pts.y.values) / size).astype(int)     # ряды сверху вниз (с севера)
+
+        def letters(n):
+            s = ""
+            n += 1
+            while n:
+                n, r = divmod(n - 1, 26)
+                s = chr(65 + r) + s
+            return s
+        labels = [f"{letters(r)}{c + 1}" for r, c in zip(row, col)]
+        self.sheet_grid = dict(minx=minx, maxy=maxy, size=size)
+        log.info("Листы сетки %.0f × %.0f м: %d листов с полигонами", size, size, len(set(labels)))
+        return labels, row * 10000 + col
 
     # ---- тропы ----
     def _load_trails(self):
@@ -682,6 +1480,7 @@ class Results:
     def add(self, vydel_row, measure: dict, basis: str, value=None):
         self.rows.append({
             "ООЗТ": vydel_row["OOZT"], "Квартал": vydel_row["KV"], "Выдел": vydel_row["VYD"],
+            "_sort": vydel_row.get("KV_SORT", vydel_row["KV"]),
             "Тип выдела": vydel_row["Type"], "Экосистема": vydel_row["Name"],
             "Тип мероприятий": measure.get("group", ""), "Мероприятие": measure["name"],
             "Тип экосистемы мероприятия": measure.get("eco", ""),
@@ -705,13 +1504,13 @@ class Results:
         # объединяем дубли (один выдел — одно мероприятие) с конкатенацией оснований
         key = ["ООЗТ", "Квартал", "Выдел", "Мероприятие"]
         agg = df.groupby(key, as_index=False, sort=False).agg({
-            "Тип выдела": "first", "Экосистема": "first", "Тип мероприятий": "first",
+            "Тип выдела": "first", "Экосистема": "first", "Тип мероприятий": "first", "_sort": "first",
             "Тип экосистемы мероприятия": "first",
             "Пункт Приказа": "first", "Сезонность": "first",
             "Основание": lambda s: "; ".join(dict.fromkeys([x for x in s if x])),
             "Значение": "first",
         })
-        agg = agg.sort_values(["ООЗТ", "Квартал", "Выдел", "Тип мероприятий", "Мероприятие"])
+        agg = agg.sort_values(["ООЗТ", "_sort", "Выдел", "Тип мероприятий", "Мероприятие"])
         cols = ["ООЗТ", "Квартал", "Выдел", "Тип выдела", "Экосистема", "Тип мероприятий", "Мероприятие",
                 "Тип экосистемы мероприятия", "Пункт Приказа", "Сезонность", "Основание", "Значение"]
         return agg[cols].reset_index(drop=True)
@@ -725,6 +1524,17 @@ class Results:
 # =====================================================================================
 #                                     ПРАВИЛА
 # =====================================================================================
+_CUR_CFG: Config | None = None     # текущая конфигурация (для подписей в журнале и основаниях)
+
+
+def _units() -> str:
+    return unit_labels(_CUR_CFG)["units_gen"] if _CUR_CFG else "выделов"
+
+
+def _unit_word() -> str:
+    return "полигона" if (_CUR_CFG and _CUR_CFG.unit_mode == "eco") else "выдела"
+
+
 def _overlay_patches_to_vydels(data: Data, patches: gpd.GeoDataFrame, target: gpd.GeoDataFrame,
                                min_ha=MIN_PATCH_HA):
     """Пересечение полигонов-пятен с выделами; возвращает DataFrame uid → площадь пятен (га), доля."""
@@ -742,8 +1552,8 @@ def rule_type(data: Data, res: Results, measure: dict, keys, label):
     """Назначение по типу выдела."""
     sel = data.vydels_of_type(*keys)
     for _, r in sel.iterrows():
-        res.add(r, measure, f"тип выдела «{r['Type']}» ({label})")
-    log.info("  → %d выделов", len(sel))
+        res.add(r, measure, f"тип {_unit_word()} «{r['Type']}» ({label})")
+    log.info("  → %d %s", len(sel), _units())
 
 
 def rule_trail_density_vydel(data: Data, res: Results, measure: dict, type_keys=TYPE_FOREST):
@@ -781,7 +1591,7 @@ def rule_trail_density_vydel(data: Data, res: Results, measure: dict, type_keys=
                 ]
     res.add_evidence(trails_in, measure["name"],
                      "тропы в зонах повышенной плотности")
-    log.info("  → %d выделов (порог %.0f м/га)", len(sel), thr)
+    log.info("  → %d %s (порог %.0f м/га)", len(sel), _units(), thr)
 
 
 def _trail_hotspots(data: Data):
@@ -816,7 +1626,7 @@ def rule_trail_hotspot(data: Data, res: Results, measure: dict, type_keys=TYPE_F
         pieces = polys[polys.intersects(unary_union(sel.geometry.values))]
         res.add_evidence(pieces, measure["name"],
                          "зоны повышенной плотности троп (верхний квартиль)")
-    log.info("  → %d выделов", len(hit))
+    log.info("  → %d %s", len(hit), _units())
 
 
 def rule_shore_trails(data: Data, res: Results, measure: dict):
@@ -845,7 +1655,7 @@ def rule_shore_trails(data: Data, res: Results, measure: dict):
             res.add_evidence(data.hydro_lines[data.hydro_lines.intersects(near)], measure["name"], "водные объекты (линии)")
         if data.hydro_polys is not None:
             res.add_evidence(data.hydro_polys[data.hydro_polys.intersects(near)], measure["name"], "водные объекты (полигоны)")
-    log.info("  → %d выделов", len(hit))
+    log.info("  → %d %s", len(hit), _units())
 
 
 def _species_group(data: Data, kind: str):
@@ -890,7 +1700,7 @@ def rule_invasive(data: Data, res: Results, measure: dict):
             res.add(r, measure, f"точечное удаление: {', '.join(f'{k} ({v})' for k, v in sp.items())}; "
                                 f"координаты WGS 84: {'; '.join(coords)}", int(len(grp)))
         res.add_evidence(j, measure["name"], "инвазионные виды — точки", "species")
-        log.info("  точки: %d выделов", j["uid"].nunique())
+        log.info("  точки: %d %s", j["uid"].nunique(), _units())
     # полигоны
     if polys is not None and not polys.empty:
         j = gpd.overlay(polys, data.oozt[["uid", "geometry"]], how="intersection")
@@ -954,8 +1764,8 @@ def rule_rare_trails(data: Data, res: Results, measure: dict):
                             round(grp["len"].sum()))
                 res.add_evidence(j, measure["name"],
                                  f"тропы на расстоянии {RARE_BUFFER_M:.0f} м от редких видов")
-                log.info("  тропы на расстоянии %.0f м от редких видов: %d выделов",
-                         RARE_BUFFER_M, j["uid"].nunique())
+                log.info("  тропы на расстоянии %.0f м от редких видов: %d %s",
+                         RARE_BUFFER_M, j["uid"].nunique(), _units())
             res.add_evidence(pts[pts.intersects(data.union)] if pts is not None else None,
                              measure["name"], "редкие виды — точки", "species")
             res.add_evidence(polys, measure["name"], "редкие виды — полигоны", "species")
@@ -1002,14 +1812,14 @@ def rule_slope(data: Data, res: Results, measure: dict, threshold_pct: float, ty
         r = data.oozt[data.oozt["uid"] == h["uid"]].iloc[0]
         eco_label = "в луговых экосистемах" if type_keys else "в любых экосистемах"
         res.add(r, measure, f"уклон более {threshold_pct:g}% {eco_label}: "
-                           f"{h['patch_ha']:.2f} га ({h['share'] * 100:.0f} % выдела)",
+                           f"{h['patch_ha']:.2f} га ({h['share'] * 100:.0f} % {_unit_word()})",
                 round(h["patch_ha"], 2))
     if not hit.empty:
         sel = target[target["uid"].isin(hit["uid"])]
         pieces = polys[polys.intersects(unary_union(sel.geometry.values))]
         eco_label = "в луговых экосистемах" if type_keys else "в любых экосистемах"
         res.add_evidence(pieces, measure["name"], f"уклон более {threshold_pct:g}% {eco_label}")
-    log.info("  → %d выделов (%d пятен)", len(hit), len(polys))
+    log.info("  → %d %s (%d пятен)", len(hit), _units(), len(polys))
 
 
 def rule_corvus(data: Data, res: Results, measure: dict, genus="Corvus", type_keys=TYPE_FOREST):
@@ -1033,47 +1843,38 @@ def rule_corvus(data: Data, res: Results, measure: dict, genus="Corvus", type_ke
                             f"{h['patch_ha']:.2f} га", round(h["patch_ha"], 2))
     res.add_evidence(polys[polys.intersects(data.union)], measure["name"], f"плотность {genus} (Q75)")
     res.add_evidence(c[c.intersects(data.union.buffer(CORVUS_WINDOW_M))], measure["name"], f"{genus} — точки", "species")
-    log.info("  → %d выделов (%d точек %s)", len(hit), len(c), genus)
+    log.info("  → %d %s (%d точек %s)", len(hit), _units(), len(c), genus)
 
 
 # --- сопоставление текста «Метод выявления» с правилом -------------------------------
 def dispatch_rule(measure: dict, data: Data, res: Results) -> bool:
-    m = (measure.get("method") or "").lower()
-    nm = (measure.get("name") or "").lower()
-    if not m or "нет данных" in m:
+    c = classify_measure(measure)
+    if c["rule"] is None:
+        if c["reason"] == "метод не распознан":
+            log.warning("  %s: метод не распознан: «%s» — пропуск", measure["name"], measure.get("method"))
         return False
-    log.info("Мероприятие: %s", measure["name"])
-
-    if "corvus" in m or "ворон" in nm:
+    log.info("Мероприятие: %s%s", (measure.get("code") + " ") if measure.get("code") else "", measure["name"])
+    st = measure_status(measure, data.cfg)
+    if st["state"] == "missing":
+        log.warning("  %s — пропуск", st["text"])
+        return False
+    rule, pr = c["rule"], c["params"]
+    if rule == "corvus":
         rule_corvus(data, res, measure)
-    elif "уклон" in m or "цмр" in m:
-        mt = re.search(r"(\d+(?:[.,]\d+)?)\s*%", m)
-        thr = float(mt.group(1).replace(",", ".")) if mt else 7.0
-        keys = TYPE_MEADOW if "лугов" in m else None
-        if keys is None and "люб" in str(measure.get("eco", "")).lower():
-            thr = 7.0
-        rule_slope(data, res, measure, thr, keys)
-    elif ("инвази" in m or "чужерод" in nm or "инвази" in nm) and "троп" not in m:
+    elif rule == "slope":
+        rule_slope(data, res, measure, pr["threshold_pct"], pr["type_keys"])
+    elif rule == "invasive":
         rule_invasive(data, res, measure)
-    elif "точек видов" in m or ("ликвидация троп" in m and "50" in m):
+    elif rule == "rare":
         rule_rare_trails(data, res, measure)
-    elif "периметр" in m or "берег" in nm or "водо" in m:
+    elif rule == "shore":
         rule_shore_trails(data, res, measure)
-    elif "скольз" in m and "троп" in m:
+    elif rule == "trail_hotspot":
         rule_trail_hotspot(data, res, measure)
-    elif "плотност" in m and ("дорог" in m or "троп" in m):
+    elif rule == "trail_density":
         rule_trail_density_vydel(data, res, measure)
-    elif "лугов" in m:
-        rule_type(data, res, measure, TYPE_MEADOW, "луговые")
-    elif "околовод" in m:
-        rule_type(data, res, measure, TYPE_WATER + TYPE_NEARWATER, "водные и околоводные")
-    elif "водн" in m:
-        rule_type(data, res, measure, TYPE_WATER, "водные")
-    elif "лесн" in m:
-        rule_type(data, res, measure, TYPE_FOREST, "лесные")
-    else:
-        log.warning("  метод не распознан: «%s» — пропуск", measure.get("method"))
-        return False
+    elif rule == "type":
+        rule_type(data, res, measure, pr["keys"], pr["label"])
     return True
 
 
@@ -1096,6 +1897,9 @@ def read_measures(path: str) -> list[dict]:
     if not (c_name and c_on and c_method):
         raise ValueError(f"В Excel не найдены колонки «Мероприятия», «Вкл/выкл», «Метод выявления»: {list(df.columns)}")
     df[c_group] = df[c_group].ffill() if c_group else ""
+    code_re = re.compile(r"^[IVX]+\.\d+$")
+    c_code = next((c for c in df.columns
+                   if df[c].dropna().astype(str).str.strip().str.match(code_re).mean() > 0.6), None)
     out = []
     for _, r in df.iterrows():
         if pd.isna(r[c_name]):
@@ -1103,6 +1907,7 @@ def read_measures(path: str) -> list[dict]:
         on = str(r[c_on]).strip().lower() in ("1", "1.0", "true", "да", "yes", "вкл")
         out.append({
             "name": re.sub(r"\s+", " ", str(r[c_name])).strip(),
+            "code": str(r[c_code]).strip() if c_code and not pd.isna(r[c_code]) else "",
             "on": on,
             "method": None if pd.isna(r[c_method]) else str(r[c_method]).strip(),
             "group": re.sub(r"\s+", " ", str(r[c_group])).strip() if c_group and not pd.isna(r[c_group]) else "",
@@ -1318,9 +2123,10 @@ def draw_kvartal(data: Data, evidence: gpd.GeoDataFrame | None, kv, oozt_name, o
     # границы выделов поверх всех тематических слоёв
     vyd.boundary.plot(ax=ax, color="#333333", linewidth=1.15, zorder=8)
     # подписи выделов
+    lab_fs = 13 if len(vyd) <= 30 else (10 if len(vyd) <= 80 else 7)
     for _, r in vyd.iterrows():
         p = r.geometry.representative_point()
-        ax.annotate(str(r["VYD"]), (p.x, p.y), ha="center", va="center", fontsize=13, fontweight="bold",
+        ax.annotate(str(r["VYD"]), (p.x, p.y), ha="center", va="center", fontsize=lab_fs, fontweight="bold",
                     color="#111111", zorder=11)
     # соседние кварталы: границы и номера в пределах окна карты
     map_box = box(ext[0], ext[2], ext[1], ext[3])
@@ -1362,7 +2168,7 @@ def draw_kvartal(data: Data, evidence: gpd.GeoDataFrame | None, kv, oozt_name, o
             log.warning("подложка OSM недоступна: %s", e)
     ax.legend(handles=handles, loc="upper left", bbox_to_anchor=(1.01, 1.0), fontsize=12, frameon=True,
               title="Легенда", title_fontsize=12)
-    ax.set_title(f"{oozt_name}. Квартал {kv}", fontsize=15, fontweight="bold")
+    ax.set_title(f"{oozt_name}. {unit_labels(data.cfg)['group']} {kv}", fontsize=15, fontweight="bold")
     ax.tick_params(labelsize=12)
     try:
         set_degree_ticks(ax, ext)
@@ -1394,61 +2200,89 @@ def md_table(df: pd.DataFrame, cols: list[str]) -> str:
     return "\n".join(lines)
 
 
-def build_report(data: Data, table: pd.DataFrame, evidence, out_dir: Path, kv_list: list[int], basemap=True):
+def _report_groups_table(data: Data, kv_list) -> pd.DataFrame:
+    """Список групп отчёта (кварталов / листов / групп) в порядке KV_SORT с учётом фильтра."""
+    kv_all = (data.oozt[["OOZT", "KV", "KV_SORT"]].drop_duplicates(["OOZT", "KV"])
+              .sort_values(["OOZT", "KV_SORT"]))
+    if kv_list:
+        want = {str(x).strip() for x in kv_list}
+        kv_all = kv_all[kv_all["KV"].astype(str).isin(want)]
+        miss = want - set(kv_all["KV"].astype(str))
+        if miss:
+            log.warning("В слое нет запрошенных для отчёта значений (%s): %s",
+                        unit_labels(data.cfg)["groups_n"].lower(), ", ".join(sorted(miss)))
+    return kv_all
+
+
+def _report_rename(cfg: Config) -> dict:
+    L = unit_labels(cfg)
+    return {"Экосистема": L["unit_name"], "Мероприятие": "Мероприятия",
+            "Тип экосистемы мероприятия": "Тип экосистемы", "Пункт Приказа": "Соответствие Пункту Приказа",
+            "Выдел": L["unit"]}
+
+
+def _fig_name(oozt, kv) -> str:
+    safe = lambda x: re.sub(r"[^\w]+", "_", str(x))
+    return "fig_" + safe(oozt) + "_kv_" + safe(kv) + ".png"
+
+
+def _params_line() -> str:
+    return ("Параметры: окно плотности троп %.0f м, окно плотности врановых %.0f м, буфер от точек редких видов "
+            "%.0f м, порог SDM %.2f (инвазионные) / %.2f (редкие), верхний квартиль — по всем ООЗТ."
+            % (TRAIL_WINDOW_M, CORVUS_WINDOW_M, RARE_BUFFER_M, SDM_THRESHOLD_INVASIVE, SDM_THRESHOLD_RARE))
+
+
+def _summary_table(table: pd.DataFrame, L: dict) -> pd.DataFrame:
+    return table.groupby(["Тип мероприятий", "Мероприятие"]).agg(
+        **{L["units_n"]: ("Выдел", "size"), L["groups_n"]: ("Квартал", "nunique")}).reset_index()
+
+
+def build_report(data: Data, table: pd.DataFrame, evidence, out_dir: Path, kv_list, basemap=True):
     enable_win_dll_path()
+    cfg = data.cfg
+    L = unit_labels(cfg)
     rep = out_dir / "report"
     rep.mkdir(parents=True, exist_ok=True)
-    kv_all = data.oozt[["OOZT", "KV"]].drop_duplicates().sort_values(["OOZT", "KV"])
-    if kv_list:
-        kv_all = kv_all[kv_all["KV"].isin(kv_list)]
-    md = [f"# Природоохранные мероприятия по кварталам ООЗТ\n",
-          f"Слой ООЗТ: `{Path(data.cfg.oozt_path).name}`; таблица мероприятий: `{Path(data.cfg.measures_xlsx).name}`.  ",
-          f"Всего назначений: {len(table)}; выделов с мероприятиями: "
+    kv_all = _report_groups_table(data, kv_list)
+    mode_txt = UNIT_MODES[cfg.unit_mode]
+    if cfg.unit_mode == "eco" and not cfg.report_group_field:
+        mode_txt += f"; листы сетки {cfg.sheet_size_m:.0f} × {cfg.sheet_size_m:.0f} м"
+    md = [f"# Природоохранные мероприятия по {L['group_pl']} ООЗТ\n",
+          f"Слой территории: `{Path(cfg.oozt_path).name}` ({mode_txt}); "
+          f"таблица мероприятий: `{Path(cfg.measures_xlsx).name}`.  ",
+          f"Всего назначений: {len(table)}; {L['units_gen']} с мероприятиями: "
           f"{table[['ООЗТ', 'Квартал', 'Выдел']].drop_duplicates().shape[0] if not table.empty else 0}.\n",
-          "Параметры: окно плотности троп %.0f м, окно плотности врановых %.0f м, буфер от точек редких видов %.0f м, "
-          "порог SDM %.2f (инвазионные) / %.2f (редкие), верхний квартиль — по всем ООЗТ.\n"
-          % (TRAIL_WINDOW_M, CORVUS_WINDOW_M, RARE_BUFFER_M, SDM_THRESHOLD_INVASIVE, SDM_THRESHOLD_RARE)]
-    # сводка по мероприятиям
+          _params_line() + "\n"]
     if not table.empty:
-        summ = table.groupby(["Тип мероприятий", "Мероприятие"]).agg(
-            Выделов=("Выдел", "size"), Кварталов=("Квартал", "nunique")).reset_index()
+        summ = _summary_table(table, L)
         md.append("## Сводка по мероприятиям\n")
-        md.append(md_table(summ, ["Тип мероприятий", "Мероприятие", "Выделов", "Кварталов"]) + "\n")
-    report_table = table.rename(columns={
-        "Экосистема": "Экосистема выдела",
-        "Мероприятие": "Мероприятия",
-        "Тип экосистемы мероприятия": "Тип экосистемы",
-        "Пункт Приказа": "Соответствие Пункту Приказа",
-    })
+        md.append(md_table(summ, ["Тип мероприятий", "Мероприятие", L["units_n"], L["groups_n"]]) + "\n")
+    report_table = table.rename(columns=_report_rename(cfg))
     group_cols = ["Тип мероприятий", "Тип экосистемы", "Соответствие Пункту Приказа"]
-    cols = ["Выдел", "Экосистема выдела", "Мероприятия", "Основание"]
+    cols = [L["unit"], L["unit_name"], "Мероприятия", "Основание"]
     for _, kr in kv_all.iterrows():
         oozt, kv = kr["OOZT"], kr["KV"]
-        png = rep / f"fig_{re.sub(r'[^\w]+', '_', str(oozt))}_kv_{kv}.png"
-        log.info("Схема: %s кв. %s", oozt, kv)
+        png = rep / _fig_name(oozt, kv)
+        log.info("Схема: %s, %s %s", oozt, L["group"].lower(), kv)
         draw_kvartal(data, evidence, kv, oozt, png, basemap=basemap)
         sub = report_table[
-            (report_table["ООЗТ"] == oozt) & (report_table["Квартал"] == kv)
+            (report_table["ООЗТ"] == oozt) & (report_table["Квартал"].astype(str) == str(kv))
         ] if not report_table.empty else report_table
-        md.append(f"\n## {oozt}. Квартал {kv}\n")
-        md.append(f"![Квартал {kv}]({png.relative_to(rep).as_posix()})\n")
-        vyd = data.oozt[(data.oozt["KV"] == kv) & (data.oozt["OOZT"] == oozt)]
-        md.append(f"Выделов: {len(vyd)}; площадь {vyd['area_ha'].sum():.1f} га; "
+        md.append(f"\n## {oozt}. {L['group']} {kv}\n")
+        md.append(f"![{L['group']} {kv}]({png.relative_to(rep).as_posix()})\n")
+        vyd = data.oozt[(data.oozt["KV"].astype(str) == str(kv)) & (data.oozt["OOZT"] == oozt)]
+        md.append(f"{L['units_n']}: {len(vyd)}; площадь {vyd['area_ha'].sum():.1f} га; "
                   f"назначено мероприятий: {len(sub)}.\n")
         if sub.empty:
             md.append("_Мероприятия по загруженным данным не назначены._\n")
         else:
             md.append("### Мероприятия по приказу\n")
-            grouped = sub.sort_values(group_cols + ["Выдел"]).groupby(
-                group_cols, sort=False, dropna=False
-            )
+            grouped = sub.sort_values(group_cols + [L["unit"]]).groupby(group_cols, sort=False, dropna=False)
             for (measure_type, ecosystem_type, order_clause), group in grouped:
                 md.append(f"#### Тип мероприятий: {measure_type}\n")
                 md.append(f"##### Тип экосистемы: {ecosystem_type}\n")
-                md.append(
-                    f"###### Соответствие Пункту Приказа: {order_clause}\n"
-                )
-                md.append(md_table(group.sort_values(["Выдел"]), cols) + "\n")
+                md.append(f"###### Соответствие Пункту Приказа: {order_clause}\n")
+                md.append(md_table(group.sort_values([L["unit"]]), cols) + "\n")
     (rep / "report.md").write_text("\n".join(md), encoding="utf-8")
     # DOCX: сначала pandoc (если установлен), иначе python-docx (если установлен)
     done = False
@@ -1473,10 +2307,13 @@ def build_report(data: Data, table: pd.DataFrame, evidence, out_dir: Path, kv_li
 
 
 def build_docx(data: Data, table: pd.DataFrame, kv_all: pd.DataFrame, rep: Path, cols: list[str]):
-    """Word-версия отчёта: заголовок, сводка, по кварталу — схема (ширина страницы) + таблица."""
+    """Word-версия отчёта: заголовок, сводка, по группе — схема (ширина страницы) + таблица."""
     from docx import Document
     from docx.shared import Cm, Pt
     from docx.enum.section import WD_ORIENT
+    cfg = data.cfg
+    L = unit_labels(cfg)
+    group_cols = ["Тип мероприятий", "Тип экосистемы", "Соответствие Пункту Приказа"]
 
     doc = Document()
     sec = doc.sections[0]
@@ -1506,52 +2343,38 @@ def build_docx(data: Data, table: pd.DataFrame, kv_all: pd.DataFrame, rep: Path,
                     row.cells[i].width = Cm(w)
         return t
 
-    doc.add_heading("Природоохранные мероприятия по кварталам ООЗТ", level=0)
-    doc.add_paragraph(f"Слой ООЗТ: {Path(data.cfg.oozt_path).name}; таблица мероприятий: "
-                      f"{Path(data.cfg.measures_xlsx).name}. Всего назначений: {len(table)}.")
-    doc.add_paragraph("Параметры: окно плотности троп %.0f м, окно плотности врановых %.0f м, буфер от точек редких "
-                      "видов %.0f м, порог SDM %.2f (инвазионные) / %.2f (редкие), верхний квартиль — "
-                      "по всем ООЗТ."
-                      % (TRAIL_WINDOW_M, CORVUS_WINDOW_M, RARE_BUFFER_M,
-                         SDM_THRESHOLD_INVASIVE, SDM_THRESHOLD_RARE))
+    doc.add_heading(f"Природоохранные мероприятия по {L['group_pl']} ООЗТ", level=0)
+    doc.add_paragraph(f"Слой территории: {Path(cfg.oozt_path).name} ({UNIT_MODES[cfg.unit_mode]}); "
+                      f"таблица мероприятий: {Path(cfg.measures_xlsx).name}. Всего назначений: {len(table)}.")
+    doc.add_paragraph(_params_line())
     if not table.empty:
         doc.add_heading("Сводка по мероприятиям", level=1)
-        summ = table.groupby(["Тип мероприятий", "Мероприятие"]).agg(
-            Выделов=("Выдел", "size"), Кварталов=("Квартал", "nunique")).reset_index()
-        add_table(summ, ["Тип мероприятий", "Мероприятие", "Выделов", "Кварталов"])
+        add_table(_summary_table(table, L), ["Тип мероприятий", "Мероприятие", L["units_n"], L["groups_n"]])
+    doc_table = table.rename(columns=_report_rename(cfg))
     for _, kr in kv_all.iterrows():
         oozt, kv = kr["OOZT"], kr["KV"]
-        png = rep / f"fig_{re.sub(r'[^\w]+', '_', str(oozt))}_kv_{kv}.png"
+        png = rep / _fig_name(oozt, kv)
         doc.add_page_break()
-        doc.add_heading(f"{oozt}. Квартал {kv}", level=1)
+        doc.add_heading(f"{oozt}. {L['group']} {kv}", level=1)
         if png.exists():
             doc.add_picture(str(png), width=Cm(26))
-        doc_table = table.rename(columns={
-            "Экосистема": "Экосистема выдела",
-            "Мероприятие": "Мероприятия",
-            "Тип экосистемы мероприятия": "Тип экосистемы",
-            "Пункт Приказа": "Соответствие Пункту Приказа",
-        })
         sub = doc_table[
-            (doc_table["ООЗТ"] == oozt) & (doc_table["Квартал"] == kv)
+            (doc_table["ООЗТ"] == oozt) & (doc_table["Квартал"].astype(str) == str(kv))
         ] if not doc_table.empty else doc_table
-        vyd = data.oozt[(data.oozt["KV"] == kv) & (data.oozt["OOZT"] == oozt)]
-        doc.add_paragraph(f"Выделов: {len(vyd)}; площадь {vyd['area_ha'].sum():.1f} га; назначено мероприятий: {len(sub)}.")
+        vyd = data.oozt[(data.oozt["KV"].astype(str) == str(kv)) & (data.oozt["OOZT"] == oozt)]
+        doc.add_paragraph(f"{L['units_n']}: {len(vyd)}; площадь {vyd['area_ha'].sum():.1f} га; "
+                          f"назначено мероприятий: {len(sub)}.")
         if sub.empty:
             doc.add_paragraph("Мероприятия по загруженным данным не назначены.")
         else:
             doc.add_heading("Мероприятия по приказу", level=2)
-            grouped = sub.sort_values(group_cols + ["Выдел"]).groupby(
-                group_cols, sort=False, dropna=False
-            )
+            grouped = sub.sort_values(group_cols + [L["unit"]]).groupby(group_cols, sort=False, dropna=False)
             for (measure_type, ecosystem_type, order_clause), group in grouped:
                 doc.add_heading(f"Тип мероприятий: {measure_type}", level=3)
                 doc.add_heading(f"Тип экосистемы: {ecosystem_type}", level=4)
-                doc.add_heading(
-                    f"Соответствие Пункту Приказа: {order_clause}", level=5
-                )
-                add_table(group.sort_values(["Выдел"]), cols, font_pt=8,
-                          widths_cm=[1.2, 4.5, 7.0, 11.0])
+                doc.add_heading(f"Соответствие Пункту Приказа: {order_clause}", level=5)
+                add_table(group.sort_values([L["unit"]]), cols, font_pt=8,
+                          widths_cm=[1.8 if cfg.unit_mode == "eco" else 1.2, 4.5, 7.0, 11.0])
     doc.save(str(rep / "report.docx"))
 
 
@@ -1572,9 +2395,12 @@ def report_only(cfg: Config):
     # Для схем нужен полный контекст троп, а не только фрагменты,
     # послужившие основанием для назначения мероприятий.
     data.trails = data._load_trails()
-    table = pd.read_csv(out / "measures_long.csv", encoding="utf-8-sig")
+    disp = display_columns(cfg)
+    table = pd.read_csv(out / "measures_long.csv", encoding="utf-8-sig",
+                        dtype={disp["Квартал"]: str, disp["Выдел"]: str})
+    table = table.rename(columns={v: k for k, v in disp.items()})
     for c in ("Квартал", "Выдел"):
-        table[c] = pd.to_numeric(table[c], errors="coerce").astype("Int64")
+        table[c] = _maybe_int(table[c])
     gpkg = out / "evidence.gpkg"
     parts = []
     for ly, _ in pyogrio.list_layers(gpkg):
@@ -1594,6 +2420,10 @@ def run(cfg: Config):
     data = Data(cfg)
     cfg.save(out / "config_used.json")
     res = Results()
+    log.info("Мероприятия при выбранных данных:")
+    for m in measures:
+        stt = measure_status(m, cfg)
+        log.info("  %-6s %-60s %s", m.get("code", ""), m["name"][:60], stt["text"])
     for m in measures:
         if not m["on"]:
             continue
@@ -1608,10 +2438,11 @@ def run(cfg: Config):
         table = pd.DataFrame(columns=["ООЗТ", "Квартал", "Выдел", "Тип выдела", "Экосистема", "Тип мероприятий",
                                       "Мероприятие", "Тип экосистемы мероприятия", "Пункт Приказа",
                                       "Сезонность", "Основание", "Значение"])
-    table.to_csv(out / "measures_long.csv", index=False, encoding="utf-8-sig")
+    disp = display_columns(cfg)
+    table.rename(columns=disp).to_csv(out / "measures_long.csv", index=False, encoding="utf-8-sig")
     try:
         with pd.ExcelWriter(out / "measures_long.xlsx", engine="openpyxl") as xw:
-            table.to_excel(xw, index=False, sheet_name="long")
+            table.rename(columns=disp).to_excel(xw, index=False, sheet_name="long")
             if not table.empty:
                 order_cols = ["ООЗТ", "Квартал", "Выдел", "Тип выдела", "Экосистема",
                               "Тип мероприятий", "Мероприятие", "Тип экосистемы мероприятия",
@@ -1621,7 +2452,7 @@ def run(cfg: Config):
                     "Тип экосистемы мероприятия": "Тип экосистемы",
                     "Пункт Приказа": "Соответствие Пункту Приказа",
                 })
-                by_order.to_excel(xw, index=False, sheet_name="мероприятия по приказу")
+                by_order.rename(columns=disp).to_excel(xw, index=False, sheet_name="мероприятия по приказу")
 
                 # Значения не дедуплицируем: каждая строка во всех четырёх колонках
                 # должна соответствовать одному и тому же мероприятию.
@@ -1638,7 +2469,7 @@ def run(cfg: Config):
                     "Соответствие Пункту Приказа": ("Пункт Приказа", join_lines),
                     "Число": ("Мероприятие", "size"),
                 })
-                wide.to_excel(xw, index=False, sheet_name="by_vydel")
+                wide.rename(columns=disp).to_excel(xw, index=False, sheet_name="by_vydel")
                 from openpyxl.styles import Alignment, Font, PatternFill
                 for ws in (xw.book["мероприятия по приказу"], xw.book["by_vydel"]):
                     # Двухуровневый заголовок: четыре колонки объединены
@@ -1676,8 +2507,13 @@ def run(cfg: Config):
             agg = table.groupby(["ООЗТ", "Квартал", "Выдел"])["Мероприятие"].agg(lambda s: "; ".join(dict.fromkeys(s)))
             vm = vm.merge(agg.rename("measures").reset_index().rename(
                 columns={"ООЗТ": "OOZT", "Квартал": "KV", "Выдел": "VYD"}), on=["OOZT", "KV", "VYD"], how="left")
-        vm.drop(columns=["__src"], errors="ignore").to_crs(4326).to_file(
-            gpkg, layer="vydel_measures", driver="GPKG")
+        vm = vm.drop(columns=["__src", "KV_SORT"], errors="ignore")
+        if cfg.unit_mode == "eco":
+            # исходное поле ID уже есть в слое; служебный VYD не дублируем, KV — лист / группа отчёта
+            vm = vm.drop(columns=["VYD"] if data.F_ID in vm.columns and data.F_ID != "VYD" else [])
+            vm = vm.rename(columns={"KV": "report_sheet" if not cfg.report_group_field else "report_group"})
+        vm.to_crs(4326).to_file(gpkg, layer="vydel_measures" if cfg.unit_mode != "eco" else "eco_measures",
+                                driver="GPKG")
         if ev is not None and not ev.empty:
             for gt, grp in ev.groupby(ev.geom_type.str.replace("Multi", "")):
                 grp.to_crs(4326).to_file(
@@ -1692,21 +2528,24 @@ def run(cfg: Config):
 
 
 def main():
-    ap = argparse.ArgumentParser(description="Природоохранные мероприятия для ООЗТ по кварталам/выделам")
+    ap = argparse.ArgumentParser(description="Природоохранные мероприятия для ООЗТ: кварталы/выделы "
+                                             "или слой экосистем с уникальным ID")
     ap.add_argument("--config", help="JSON-конфигурация (без диалогов)")
-    ap.add_argument("--kv", help="кварталы для отчёта, через запятую (переопределяет конфиг)")
+    ap.add_argument("--kv", help="кварталы / листы / группы для отчёта, через запятую (переопределяет конфиг)")
+    ap.add_argument("--gui", action="store_true",
+                    help="открыть окно выбора данных, предзаполненное из --config")
     ap.add_argument("--no-basemap", action="store_true", help="не добавлять подложку OSM")
     ap.add_argument("--save-config-only", action="store_true", help="только собрать конфиг диалогами и сохранить")
     ap.add_argument("--report-only", action="store_true",
                     help="не пересчитывать: построить отчёт по measures_long.csv и evidence.gpkg из out_dir")
     args = ap.parse_args()
 
-    if args.config:
+    if args.config and not args.gui:
         cfg = Config.load(args.config)
     else:
-        cfg = gui_collect_config()
+        cfg = gui_collect_config(Config.load(args.config) if args.config else None)
     if args.kv:
-        cfg.report_kv = [int(x) for x in re.findall(r"\d+", args.kv)]
+        cfg.report_kv = [int(x) if x.isdigit() else x for x in re.split(r"[,;\s]+", args.kv) if x]
     if args.no_basemap:
         cfg.basemap = False
     if args.save_config_only:

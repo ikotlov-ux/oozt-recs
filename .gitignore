@@ -50,3 +50,6 @@ Thumbs.db
 
 # Локальный помощник выгрузки
 push_to_github.cmd
+
+# Черновые ноутбуки
+Untitled*.ipynb

@@ -1,7 +1,11 @@
 {
   "measures_xlsx": "data/measures_by_prikaz.xlsx",
+  "unit_mode": "kv_vyd",
   "oozt_path": "data/vec/OOZT_kv_vyd.shp",
   "oozt_layer": null,
+  "oozt_name": "",
+  "report_group_field": null,
+  "sheet_size_m": 1000.0,
   "dem_path": "data/ras/DEM.tif",
   "trails": [
     "data/vec/osm-highway-line.shp"
@@ -37,7 +41,18 @@
     "data/vec/aves.shp"
   ],
   "out_dir": "out",
-  "report_kv": [1, 2, 17, 40],
+  "report_kv": [
+    1,
+    2,
+    17,
+    40
+  ],
   "basemap": true,
-  "fields": {}
+  "fields": {
+    "OOZT": "OOZT",
+    "KV": "FID_kv",
+    "VYD": "FID_ecosys",
+    "TYPE": "Type",
+    "NAME": "Name"
+  }
 }
