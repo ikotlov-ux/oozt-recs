@@ -48,6 +48,10 @@
     40
   ],
   "basemap": true,
+  "report_formats": [
+    "docx",
+    "pdf"
+  ],
   "fields": {
     "OOZT": "OOZT",
     "KV": "FID_kv",

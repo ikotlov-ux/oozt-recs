@@ -43,6 +43,10 @@
   "out_dir": "out",
   "report_kv": [],
   "basemap": true,
+  "report_formats": [
+    "docx",
+    "pdf"
+  ],
   "fields": {
     "ID": "eco_id",
     "TYPE": "Type",

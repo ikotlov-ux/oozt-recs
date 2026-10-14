@@ -16,12 +16,14 @@ oozt_recs.py — подготовка природоохранных реком�
     python oozt_recs.py --config cfg.json # повторный запуск с сохранённой конфигурацией, без окна
     python oozt_recs.py --config cfg.json --gui        # окно, предзаполненное из конфигурации
     python oozt_recs.py --config cfg.json --kv 1,2,5   # отчёт только по выбранным кварталам / листам
+    python oozt_recs.py --config cfg.json --report-only --formats docx,pdf,doc   # пересобрать отчёт
 
 Выходные данные (папка out_dir)
 -------------------------------
     measures_long.xlsx / .csv   — длинная таблица ООЗТ–Квартал(Лист)–Выдел(ID)–Мероприятие (+ основание)
     evidence.gpkg               — слои-основания + полигоны с мероприятиями (vydel_measures / eco_measures)
     report/report.md            — отчёт по кварталам или листам (схема + таблицы), рисунки report/fig_*.png
+    report/report.docx, .pdf    — тот же отчёт в Word и PDF (report_formats / --formats; .doc — по запросу)
     config_used.json            — конфигурация запуска (можно передать в --config)
     run.log                     — журнал, в начале — статус каждого мероприятия при выбранных данных
 
@@ -181,6 +183,7 @@ class Config:
     out_dir: str = ""
     report_kv: list = field(default_factory=list)   # кварталы / листы / группы для отчёта; пусто = все
     basemap: bool = True
+    report_formats: list = field(default_factory=lambda: ["docx", "pdf"])  # docx, pdf, doc; report.md — всегда
     fields: dict = field(default_factory=dict)      # kv_vyd: OOZT, KV, VYD, TYPE, NAME; eco: ID, TYPE, NAME, OOZT
 
     def save(self, path: str | Path):
@@ -580,6 +583,15 @@ class SetupWindow:
         self.v_basemap = tk.BooleanVar(value=True)
         ttk.Checkbutton(s5, text="Подложка OpenStreetMap на схемах (нужен интернет)",
                         variable=self.v_basemap).pack(anchor="w", pady=(6, 0))
+        r = ttk.Frame(s5); r.pack(fill="x", pady=(6, 0))
+        ttk.Label(r, text="Отчёт:", width=8).pack(side="left")
+        self.v_formats = {k: tk.BooleanVar(value=k in ("docx", "pdf")) for k in REPORT_FORMATS}
+        for k, t in REPORT_FORMATS.items():
+            ttk.Checkbutton(r, text=t, variable=self.v_formats[k]).pack(side="left", padx=(0, 10))
+        ttk.Label(s5, foreground=self.C_MUTED, font=self.f_small, wraplength=640, justify="left",
+                  text="report.md создаётся всегда. PDF и DOC делаются через Microsoft Word (если установлен), "
+                       "иначе через LibreOffice; без них PDF собирается встроенной вёрсткой, DOC — не создаётся."
+                  ).pack(anchor="w", pady=(2, 0))
 
         # ---- кнопки
         bot = ttk.Frame(self.root, padding=(12, 4, 12, 12))
@@ -760,6 +772,7 @@ class SetupWindow:
         c.report_kv = [x.strip() for x in re.split(r"[,;\s]+", self.v_kv.get()) if x.strip()]
         c.report_kv = [int(x) if x.isdigit() else x for x in c.report_kv]
         c.basemap = bool(self.v_basemap.get())
+        c.report_formats = [k for k, v in self.v_formats.items() if v.get()]
         return c
 
     def _refresh(self):
@@ -868,6 +881,8 @@ class SetupWindow:
         self.v_out.set(cfg.out_dir or "")
         self.v_kv.set(", ".join(map(str, cfg.report_kv or [])))
         self.v_basemap.set(bool(cfg.basemap))
+        for k, v in self.v_formats.items():
+            v.set(k in (cfg.report_formats or []))
         self.field_vars = {}
         if cfg.measures_xlsx:
             self._read_measures()
@@ -2237,145 +2252,605 @@ def _summary_table(table: pd.DataFrame, L: dict) -> pd.DataFrame:
         **{L["units_n"]: ("Выдел", "size"), L["groups_n"]: ("Квартал", "nunique")}).reset_index()
 
 
-def build_report(data: Data, table: pd.DataFrame, evidence, out_dir: Path, kv_list, basemap=True):
-    enable_win_dll_path()
+REPORT_FORMATS = {"docx": "Word (DOCX)", "pdf": "PDF", "doc": "Word 97–2003 (DOC)"}
+PAGE_W_CM, PAGE_H_CM, MARGIN_CM = 29.7, 21.0, 1.5          # А4 альбомная
+TEXT_W_CM = PAGE_W_CM - 2 * MARGIN_CM
+
+
+def _report_blocks(data: Data, table: pd.DataFrame, evidence, rep: Path, kv_all: pd.DataFrame,
+                   basemap=True, draw=True) -> list:
+    """Содержание отчёта в нейтральном виде; из него собираются MD, DOCX и PDF.
+    Блоки: ("title", t) ("h", level, t) ("p", t) ("note", t) ("img", path) ("break",)
+           ("table", header, rows, widths_cm, font_pt)"""
     cfg = data.cfg
     L = unit_labels(cfg)
-    rep = out_dir / "report"
-    rep.mkdir(parents=True, exist_ok=True)
-    kv_all = _report_groups_table(data, kv_list)
     mode_txt = UNIT_MODES[cfg.unit_mode]
     if cfg.unit_mode == "eco" and not cfg.report_group_field:
         mode_txt += f"; листы сетки {cfg.sheet_size_m:.0f} × {cfg.sheet_size_m:.0f} м"
-    md = [f"# Природоохранные мероприятия по {L['group_pl']} ООЗТ\n",
-          f"Слой территории: `{Path(cfg.oozt_path).name}` ({mode_txt}); "
-          f"таблица мероприятий: `{Path(cfg.measures_xlsx).name}`.  ",
-          f"Всего назначений: {len(table)}; {L['units_gen']} с мероприятиями: "
-          f"{table[['ООЗТ', 'Квартал', 'Выдел']].drop_duplicates().shape[0] if not table.empty else 0}.\n",
-          _params_line() + "\n"]
+    n_units = table[["ООЗТ", "Квартал", "Выдел"]].drop_duplicates().shape[0] if not table.empty else 0
+    B = [("title", f"Природоохранные мероприятия по {L['group_pl']} ООЗТ"),
+         ("p", f"Слой территории: {Path(cfg.oozt_path).name} ({mode_txt}); "
+               f"таблица мероприятий: {Path(cfg.measures_xlsx).name}."),
+         ("p", f"Всего назначений: {len(table)}; {L['units_gen']} с мероприятиями: {n_units}; "
+               f"{L['groups_n'].lower()} в отчёте: {len(kv_all)}."),
+         ("p", _params_line())]
+    s = lambda v: "" if pd.isna(v) else str(v)
     if not table.empty:
         summ = _summary_table(table, L)
-        md.append("## Сводка по мероприятиям\n")
-        md.append(md_table(summ, ["Тип мероприятий", "Мероприятие", L["units_n"], L["groups_n"]]) + "\n")
+        hdr = ["Тип мероприятий", "Мероприятие", L["units_n"], L["groups_n"]]
+        B += [("h", 1, "Сводка по мероприятиям"),
+              ("table", hdr, [[s(r[c]) for c in hdr] for _, r in summ.iterrows()], [5.0, 15.7, 3.0, 3.0], 9)]
     report_table = table.rename(columns=_report_rename(cfg))
     group_cols = ["Тип мероприятий", "Тип экосистемы", "Соответствие Пункту Приказа"]
     cols = [L["unit"], L["unit_name"], "Мероприятия", "Основание"]
+    w0 = 1.8 if cfg.unit_mode == "eco" else 1.3
+    widths = [w0, 4.6, 7.4, TEXT_W_CM - w0 - 4.6 - 7.4]
     for _, kr in kv_all.iterrows():
         oozt, kv = kr["OOZT"], kr["KV"]
         png = rep / _fig_name(oozt, kv)
-        log.info("Схема: %s, %s %s", oozt, L["group"].lower(), kv)
-        draw_kvartal(data, evidence, kv, oozt, png, basemap=basemap)
+        if draw:
+            log.info("Схема: %s, %s %s", oozt, L["group"].lower(), kv)
+            draw_kvartal(data, evidence, kv, oozt, png, basemap=basemap)
         sub = report_table[
             (report_table["ООЗТ"] == oozt) & (report_table["Квартал"].astype(str) == str(kv))
         ] if not report_table.empty else report_table
-        md.append(f"\n## {oozt}. {L['group']} {kv}\n")
-        md.append(f"![{L['group']} {kv}]({png.relative_to(rep).as_posix()})\n")
         vyd = data.oozt[(data.oozt["KV"].astype(str) == str(kv)) & (data.oozt["OOZT"] == oozt)]
-        md.append(f"{L['units_n']}: {len(vyd)}; площадь {vyd['area_ha'].sum():.1f} га; "
-                  f"назначено мероприятий: {len(sub)}.\n")
-        if sub.empty:
-            md.append("_Мероприятия по загруженным данным не назначены._\n")
-        else:
-            md.append("### Мероприятия по приказу\n")
-            grouped = sub.sort_values(group_cols + [L["unit"]]).groupby(group_cols, sort=False, dropna=False)
-            for (measure_type, ecosystem_type, order_clause), group in grouped:
-                md.append(f"#### Тип мероприятий: {measure_type}\n")
-                md.append(f"##### Тип экосистемы: {ecosystem_type}\n")
-                md.append(f"###### Соответствие Пункту Приказа: {order_clause}\n")
-                md.append(md_table(group.sort_values([L["unit"]]), cols) + "\n")
-    (rep / "report.md").write_text("\n".join(md), encoding="utf-8")
-    # DOCX: сначала pandoc (если установлен), иначе python-docx (если установлен)
-    done = False
-    try:
-        import shutil, subprocess
-        if shutil.which("pandoc"):
-            subprocess.run(["pandoc", "report.md", "-o", "report.docx", "--resource-path", "."],
-                           cwd=rep, check=True, timeout=300)
-            log.info("Отчёт сконвертирован в DOCX (pandoc)")
-            done = True
-    except Exception as e:
-        log.info("pandoc недоступен (%s)", e)
-    if not done:
-        try:
-            build_docx(data, table, kv_all, rep, cols)
-            log.info("Отчёт записан в DOCX (python-docx)")
-        except ImportError:
-            log.info("python-docx не установлен — отчёт только в Markdown (pip install python-docx)")
-        except Exception as e:
-            log.warning("DOCX не создан: %s", e)
-    return rep / "report.md"
-
-
-def build_docx(data: Data, table: pd.DataFrame, kv_all: pd.DataFrame, rep: Path, cols: list[str]):
-    """Word-версия отчёта: заголовок, сводка, по группе — схема (ширина страницы) + таблица."""
-    from docx import Document
-    from docx.shared import Cm, Pt
-    from docx.enum.section import WD_ORIENT
-    cfg = data.cfg
-    L = unit_labels(cfg)
-    group_cols = ["Тип мероприятий", "Тип экосистемы", "Соответствие Пункту Приказа"]
-
-    doc = Document()
-    sec = doc.sections[0]
-    sec.orientation = WD_ORIENT.LANDSCAPE
-    sec.page_width, sec.page_height = Cm(29.7), Cm(21.0)
-    for side in ("left_margin", "right_margin", "top_margin", "bottom_margin"):
-        setattr(sec, side, Cm(1.5))
-    st = doc.styles["Normal"]
-    st.font.name = "Times New Roman"; st.font.size = Pt(11)
-
-    def add_table(df: pd.DataFrame, columns: list[str], font_pt=10, widths_cm=None):
-        t = doc.add_table(rows=1, cols=len(columns))
-        t.style = "Table Grid"
-        t.autofit = widths_cm is None
-        for i, c in enumerate(columns):
-            cell = t.rows[0].cells[i]; cell.text = ""
-            run = cell.paragraphs[0].add_run(str(c)); run.bold = True; run.font.size = Pt(font_pt)
-        for _, r in df.iterrows():
-            cells = t.add_row().cells
-            for i, c in enumerate(columns):
-                v = r[c]
-                cells[i].text = ""
-                run = cells[i].paragraphs[0].add_run("" if pd.isna(v) else str(v)); run.font.size = Pt(font_pt)
-        if widths_cm:
-            for row in t.rows:
-                for i, w in enumerate(widths_cm):
-                    row.cells[i].width = Cm(w)
-        return t
-
-    doc.add_heading(f"Природоохранные мероприятия по {L['group_pl']} ООЗТ", level=0)
-    doc.add_paragraph(f"Слой территории: {Path(cfg.oozt_path).name} ({UNIT_MODES[cfg.unit_mode]}); "
-                      f"таблица мероприятий: {Path(cfg.measures_xlsx).name}. Всего назначений: {len(table)}.")
-    doc.add_paragraph(_params_line())
-    if not table.empty:
-        doc.add_heading("Сводка по мероприятиям", level=1)
-        add_table(_summary_table(table, L), ["Тип мероприятий", "Мероприятие", L["units_n"], L["groups_n"]])
-    doc_table = table.rename(columns=_report_rename(cfg))
-    for _, kr in kv_all.iterrows():
-        oozt, kv = kr["OOZT"], kr["KV"]
-        png = rep / _fig_name(oozt, kv)
-        doc.add_page_break()
-        doc.add_heading(f"{oozt}. {L['group']} {kv}", level=1)
+        B += [("break",), ("h", 1, f"{oozt}. {L['group']} {kv}")]
         if png.exists():
-            doc.add_picture(str(png), width=Cm(26))
-        sub = doc_table[
-            (doc_table["ООЗТ"] == oozt) & (doc_table["Квартал"].astype(str) == str(kv))
-        ] if not doc_table.empty else doc_table
-        vyd = data.oozt[(data.oozt["KV"].astype(str) == str(kv)) & (data.oozt["OOZT"] == oozt)]
-        doc.add_paragraph(f"{L['units_n']}: {len(vyd)}; площадь {vyd['area_ha'].sum():.1f} га; "
-                          f"назначено мероприятий: {len(sub)}.")
+            B.append(("img", png))
+        B.append(("p", f"{L['units_n']}: {len(vyd)}; площадь {vyd['area_ha'].sum():.1f} га; "
+                       f"назначено мероприятий: {len(sub)}."))
         if sub.empty:
-            doc.add_paragraph("Мероприятия по загруженным данным не назначены.")
-        else:
-            doc.add_heading("Мероприятия по приказу", level=2)
-            grouped = sub.sort_values(group_cols + [L["unit"]]).groupby(group_cols, sort=False, dropna=False)
-            for (measure_type, ecosystem_type, order_clause), group in grouped:
-                doc.add_heading(f"Тип мероприятий: {measure_type}", level=3)
-                doc.add_heading(f"Тип экосистемы: {ecosystem_type}", level=4)
-                doc.add_heading(f"Соответствие Пункту Приказа: {order_clause}", level=5)
-                add_table(group.sort_values([L["unit"]]), cols, font_pt=8,
-                          widths_cm=[1.8 if cfg.unit_mode == "eco" else 1.2, 4.5, 7.0, 11.0])
-    doc.save(str(rep / "report.docx"))
+            B.append(("note", "Мероприятия по загруженным данным не назначены."))
+            continue
+        B.append(("h", 2, "Мероприятия по приказу"))
+        grouped = sub.sort_values(group_cols + [L["unit"]]).groupby(group_cols, sort=False, dropna=False)
+        for (measure_type, ecosystem_type, order_clause), group in grouped:
+            B += [("h", 3, f"Тип мероприятий: {s(measure_type)}"),
+                  ("h", 4, f"Тип экосистемы: {s(ecosystem_type)}"),
+                  ("h", 5, f"Соответствие Пункту Приказа: {s(order_clause)}"),
+                  ("table", cols, [[s(r[c]) for c in cols] for _, r in group.sort_values([L["unit"]]).iterrows()],
+                   widths, 9)]
+    return B
+
+
+# ------------------------------------------------------------------ Markdown
+def _write_md(blocks: list, path: Path):
+    def esc(x):
+        return str(x).replace("|", "／").replace("\n", " ")
+    out = []
+    for b in blocks:
+        k = b[0]
+        if k == "title":
+            out.append(f"# {b[1]}\n")
+        elif k == "h":
+            out.append(f"{'#' * (b[1] + 1)} {b[2]}\n")
+        elif k == "p":
+            out.append(b[1] + "\n")
+        elif k == "note":
+            out.append(f"_{b[1]}_\n")
+        elif k == "img":
+            try:
+                rel = b[1].resolve().relative_to(path.parent.resolve()).as_posix()
+            except ValueError:
+                rel = Path(os.path.relpath(b[1].resolve(), path.parent.resolve())).as_posix()
+            out.append(f"![{b[1].stem}]({rel})\n")
+        elif k == "table":
+            hdr, rows = b[1], b[2]
+            t = ["| " + " | ".join(hdr) + " |", "|" + "|".join(["---"] * len(hdr)) + "|"]
+            t += ["| " + " | ".join(esc(v) for v in r) + " |" for r in rows]
+            out.append("\n".join(t) + "\n")
+    path.write_text("\n".join(out), encoding="utf-8")
+
+
+# ------------------------------------------------------------------ DOCX (без внешних библиотек)
+_W_NS = ('xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" '
+         'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" '
+         'xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" '
+         'xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" '
+         'xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture"')
+_BAD_XML = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
+
+
+def _x(t) -> str:
+    from xml.sax.saxutils import escape
+    return escape(_BAD_XML.sub("", str(t)))
+
+
+def _png_size(path: Path) -> tuple[int, int]:
+    import struct
+    with open(path, "rb") as f:
+        head = f.read(24)
+    if head[:8] == b"\x89PNG\r\n\x1a\n":
+        return struct.unpack(">II", head[16:24])
+    from PIL import Image
+    with Image.open(path) as im:
+        return im.size
+
+
+def _docx_styles() -> str:
+    def para(sid, name, sz, bold=False, ital=False, before=0, after=120, lvl=None, color=None, keep=False):
+        ppr = ("<w:keepNext/>" if keep else "") + f'<w:spacing w:before="{before}" w:after="{after}"/>'
+        if lvl is not None:
+            ppr += f'<w:outlineLvl w:val="{lvl}"/>'
+        rpr = ("<w:b/>" if bold else "") + ("<w:i/>" if ital else "") + \
+              (f'<w:color w:val="{color}"/>' if color else "") + f'<w:sz w:val="{sz}"/><w:szCs w:val="{sz}"/>'
+        return (f'<w:style w:type="paragraph" w:styleId="{sid}"><w:name w:val="{name}"/>'
+                f'<w:basedOn w:val="Normal"/><w:next w:val="Normal"/><w:qFormat/>'
+                f'<w:pPr>{ppr}</w:pPr><w:rPr>{rpr}</w:rPr></w:style>')
+    return (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        f'<w:styles {_W_NS}>'
+        '<w:docDefaults><w:rPrDefault><w:rPr>'
+        '<w:rFonts w:ascii="Times New Roman" w:hAnsi="Times New Roman" w:eastAsia="Times New Roman" w:cs="Times New Roman"/>'
+        '<w:sz w:val="22"/><w:szCs w:val="22"/><w:lang w:val="ru-RU"/></w:rPr></w:rPrDefault>'
+        '<w:pPrDefault><w:pPr><w:spacing w:after="120" w:line="252" w:lineRule="auto"/></w:pPr></w:pPrDefault>'
+        '</w:docDefaults>'
+        '<w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/><w:qFormat/></w:style>'
+        + para("Title", "Title", 34, bold=True, after=200, color="1F3B4D")
+        + para("Heading1", "heading 1", 28, bold=True, before=120, after=120, lvl=0, color="1F3B4D", keep=True)
+        + para("Heading2", "heading 2", 25, bold=True, before=160, after=80, lvl=1, color="1F3B4D", keep=True)
+        + para("Heading3", "heading 3", 23, bold=True, before=160, after=40, lvl=2, keep=True)
+        + para("Heading4", "heading 4", 22, bold=False, ital=True, before=0, after=40, lvl=3, keep=True)
+        + para("Heading5", "heading 5", 22, bold=False, ital=True, before=0, after=80, lvl=4, color="44546A", keep=True)
+        + para("Note", "Note", 22, ital=True, color="5F6368")
+        + '<w:style w:type="table" w:default="1" w:styleId="TableNormal"><w:name w:val="Normal Table"/>'
+          '<w:tblPr><w:tblInd w:w="0" w:type="dxa"/><w:tblCellMar><w:top w:w="0" w:type="dxa"/>'
+          '<w:left w:w="85" w:type="dxa"/><w:bottom w:w="0" w:type="dxa"/><w:right w:w="85" w:type="dxa"/>'
+          '</w:tblCellMar></w:tblPr></w:style>'
+          '<w:style w:type="table" w:styleId="TableGrid"><w:name w:val="Table Grid"/><w:basedOn w:val="TableNormal"/>'
+          '<w:tblPr><w:tblBorders>'
+        + "".join(f'<w:{s} w:val="single" w:sz="4" w:space="0" w:color="8C9AA5"/>'
+                  for s in ("top", "left", "bottom", "right", "insideH", "insideV"))
+        + '</w:tblBorders></w:tblPr></w:style></w:styles>')
+
+
+def _write_docx(blocks: list, path: Path, title: str):
+    import zipfile, datetime
+    tw = lambda cm: int(round(cm * 567))          # твипы
+    emu = lambda cm: int(round(cm * 360000))
+    body, rels, media = [], [], []
+
+    def run(t, bold=False, sz=None, ital=False):
+        rpr = ("<w:b/>" if bold else "") + ("<w:i/>" if ital else "") + \
+              (f'<w:sz w:val="{sz}"/><w:szCs w:val="{sz}"/>' if sz else "")
+        parts = str(t).split("\n")
+        inner = "<w:br/>".join(f'<w:t xml:space="preserve">{_x(p)}</w:t>' for p in parts)
+        return f"<w:r>{'<w:rPr>' + rpr + '</w:rPr>' if rpr else ''}{inner}</w:r>"
+
+    def p(t, style=None, extra_ppr=""):
+        ppr = (f'<w:pStyle w:val="{style}"/>' if style else "") + extra_ppr
+        return f"<w:p>{'<w:pPr>' + ppr + '</w:pPr>' if ppr else ''}{run(t)}</w:p>"
+
+    pending_break = False
+    for b in blocks:
+        k = b[0]
+        if k == "break":
+            pending_break = True
+            continue
+        brk = "<w:pageBreakBefore/>" if pending_break else ""
+        pending_break = False
+        if k == "title":
+            body.append(p(b[1], "Title"))
+        elif k == "h":
+            body.append(p(b[2], f"Heading{min(b[1], 5)}", brk))
+        elif k == "p":
+            body.append(p(b[1], None, brk))
+        elif k == "note":
+            body.append(p(b[1], "Note", brk))
+        elif k == "img":
+            src: Path = b[1]
+            n = len(media) + 1
+            rid = f"rIdImg{n}"
+            media.append((f"media/image{n}.png", src))
+            rels.append(f'<Relationship Id="{rid}" Type="http://schemas.openxmlformats.org/officeDocument/2006/'
+                        f'relationships/image" Target="media/image{n}.png"/>')
+            wpx, hpx = _png_size(src)
+            w_cm = TEXT_W_CM - 0.7
+            h_cm = w_cm * hpx / max(wpx, 1)
+            max_h = PAGE_H_CM - 2 * MARGIN_CM - 3.2
+            if h_cm > max_h:
+                w_cm, h_cm = w_cm * max_h / h_cm, max_h
+            cx, cy = emu(w_cm), emu(h_cm)
+            body.append(
+                f'<w:p><w:pPr><w:keepNext/>{brk}<w:spacing w:after="60"/><w:jc w:val="center"/></w:pPr><w:r><w:drawing>'
+                f'<wp:inline distT="0" distB="0" distL="0" distR="0"><wp:extent cx="{cx}" cy="{cy}"/>'
+                f'<wp:docPr id="{n}" name="Схема {n}"/><wp:cNvGraphicFramePr>'
+                f'<a:graphicFrameLocks noChangeAspect="1"/></wp:cNvGraphicFramePr>'
+                f'<a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture">'
+                f'<pic:pic><pic:nvPicPr><pic:cNvPr id="{n}" name="{_x(src.name)}"/><pic:cNvPicPr/></pic:nvPicPr>'
+                f'<pic:blipFill><a:blip r:embed="{rid}"/><a:stretch><a:fillRect/></a:stretch></pic:blipFill>'
+                f'<pic:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="{cx}" cy="{cy}"/></a:xfrm>'
+                f'<a:prstGeom prst="rect"><a:avLst/></a:prstGeom></pic:spPr></pic:pic>'
+                f'</a:graphicData></a:graphic></wp:inline></w:drawing></w:r></w:p>')
+        elif k == "table":
+            hdr, rows, widths, fpt = b[1], b[2], b[3], b[4]
+            sz = int(fpt * 2)
+            ws = [tw(w) for w in widths]
+
+            def cell(t, w, head):
+                shd = '<w:shd w:val="clear" w:color="auto" w:fill="E3EAEE"/>' if head else ""
+                return (f'<w:tc><w:tcPr><w:tcW w:w="{w}" w:type="dxa"/>{shd}</w:tcPr>'
+                        f'<w:p><w:pPr><w:spacing w:after="0" w:line="240" w:lineRule="auto"/></w:pPr>'
+                        f'{run(t, bold=head, sz=sz)}</w:p></w:tc>')
+            t = [f'<w:tbl><w:tblPr><w:tblStyle w:val="TableGrid"/><w:tblW w:w="{sum(ws)}" w:type="dxa"/>'
+                 f'<w:tblLayout w:type="fixed"/><w:tblLook w:val="04A0" w:firstRow="1" w:lastRow="0" '
+                 f'w:firstColumn="0" w:lastColumn="0" w:noHBand="0" w:noVBand="1"/></w:tblPr><w:tblGrid>'
+                 + "".join(f'<w:gridCol w:w="{w}"/>' for w in ws) + "</w:tblGrid>",
+                 '<w:tr><w:trPr><w:cantSplit/><w:tblHeader/></w:trPr>'
+                 + "".join(cell(h, w, True) for h, w in zip(hdr, ws)) + "</w:tr>"]
+            for r in rows:
+                t.append("<w:tr><w:trPr><w:cantSplit/></w:trPr>"
+                         + "".join(cell(v, w, False) for v, w in zip(r, ws)) + "</w:tr>")
+            t.append("</w:tbl>")
+            if brk:
+                body.append(f"<w:p><w:pPr>{brk}<w:spacing w:after='0'/></w:pPr></w:p>".replace("'", '"'))
+            body.append("".join(t))
+            body.append('<w:p><w:pPr><w:spacing w:after="60"/></w:pPr></w:p>')
+    m = tw(MARGIN_CM)
+    sect = (f'<w:sectPr><w:footerReference w:type="default" r:id="rIdFtr1"/>'
+            f'<w:pgSz w:w="{tw(PAGE_W_CM)}" w:h="{tw(PAGE_H_CM)}" w:orient="landscape"/>'
+            f'<w:pgMar w:top="{m}" w:right="{m}" w:bottom="{m}" w:left="{m}" w:header="425" w:footer="425" '
+            f'w:gutter="0"/></w:sectPr>')
+    document = ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+                f'<w:document {_W_NS}><w:body>{"".join(body)}{sect}</w:body></w:document>')
+    footer = ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+              f'<w:ftr {_W_NS}><w:p><w:pPr><w:jc w:val="center"/></w:pPr>'
+              '<w:r><w:rPr><w:sz w:val="18"/></w:rPr><w:fldChar w:fldCharType="begin"/></w:r>'
+              '<w:r><w:rPr><w:sz w:val="18"/></w:rPr><w:instrText xml:space="preserve"> PAGE </w:instrText></w:r>'
+              '<w:r><w:rPr><w:sz w:val="18"/></w:rPr><w:fldChar w:fldCharType="separate"/></w:r>'
+              '<w:r><w:rPr><w:sz w:val="18"/></w:rPr><w:t>1</w:t></w:r>'
+              '<w:r><w:rPr><w:sz w:val="18"/></w:rPr><w:fldChar w:fldCharType="end"/></w:r></w:p></w:ftr>')
+    rels_xml = ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+                '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+                '<Relationship Id="rIdStyles" Type="http://schemas.openxmlformats.org/officeDocument/2006/'
+                'relationships/styles" Target="styles.xml"/>'
+                '<Relationship Id="rIdFtr1" Type="http://schemas.openxmlformats.org/officeDocument/2006/'
+                'relationships/footer" Target="footer1.xml"/>' + "".join(rels) + "</Relationships>")
+    now = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    core = ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+            '<cp:coreProperties xmlns:cp="http://schemas.openxmlformats.org/package/2006/metadata/core-properties" '
+            'xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:dcterms="http://purl.org/dc/terms/" '
+            'xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">'
+            f'<dc:title>{_x(title)}</dc:title><dc:creator>oozt_recs.py</dc:creator><dc:language>ru-RU</dc:language>'
+            f'<dcterms:created xsi:type="dcterms:W3CDTF">{now}</dcterms:created>'
+            f'<dcterms:modified xsi:type="dcterms:W3CDTF">{now}</dcterms:modified></cp:coreProperties>')
+    ctypes = ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+              '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+              '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
+              '<Default Extension="xml" ContentType="application/xml"/>'
+              '<Default Extension="png" ContentType="image/png"/>'
+              '<Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.'
+              'wordprocessingml.document.main+xml"/>'
+              '<Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.'
+              'wordprocessingml.styles+xml"/>'
+              '<Override PartName="/word/footer1.xml" ContentType="application/vnd.openxmlformats-officedocument.'
+              'wordprocessingml.footer+xml"/>'
+              '<Override PartName="/docProps/core.xml" ContentType="application/vnd.openxmlformats-package.'
+              'core-properties+xml"/></Types>')
+    pkg_rels = ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+                '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+                '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/'
+                'relationships/officeDocument" Target="word/document.xml"/>'
+                '<Relationship Id="rId2" Type="http://schemas.openxmlformats.org/package/2006/relationships/'
+                'metadata/core-properties" Target="docProps/core.xml"/></Relationships>')
+    tmp = path.with_name(path.stem + ".tmp.docx")
+    with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as z:
+        z.writestr("[Content_Types].xml", ctypes)
+        z.writestr("_rels/.rels", pkg_rels)
+        z.writestr("docProps/core.xml", core)
+        z.writestr("word/document.xml", document)
+        z.writestr("word/styles.xml", _docx_styles())
+        z.writestr("word/footer1.xml", footer)
+        z.writestr("word/_rels/document.xml.rels", rels_xml)
+        for name, src in media:
+            z.write(src, "word/" + name, compress_type=zipfile.ZIP_STORED)
+    os.replace(tmp, path)
+
+
+# ------------------------------------------------------------------ PDF / DOC через Word или LibreOffice
+def _convert_with_word(docx: Path, targets: dict) -> list[str]:
+    """targets: {"pdf": Path, "doc": Path}. Возвращает список созданных форматов."""
+    import win32com.client  # noqa: F401  (pywin32; есть в conda-окружениях Windows)
+    import pythoncom
+    fmt = {"pdf": 17, "doc": 0}           # wdFormatPDF, wdFormatDocument (Word 97–2003)
+    done = []
+    pythoncom.CoInitialize()
+    word = None
+    try:
+        word = win32com.client.DispatchEx("Word.Application")
+        word.Visible = False
+        word.DisplayAlerts = 0
+        d = word.Documents.Open(str(docx.resolve()), ConfirmConversions=False, ReadOnly=True,
+                                AddToRecentFiles=False, Visible=False)
+        try:
+            d.Fields.Update()
+            for k, p in targets.items():
+                d.SaveAs2(str(p.resolve()), FileFormat=fmt[k], AddToRecentFiles=False)
+                done.append(k)
+        finally:
+            d.Close(False)
+    finally:
+        if word is not None:
+            word.Quit()
+        pythoncom.CoUninitialize()
+    return done
+
+
+def _find_soffice() -> str | None:
+    import shutil
+    for n in ("soffice", "libreoffice"):
+        p = shutil.which(n)
+        if p:
+            return p
+    for base in (os.environ.get("ProgramFiles", r"C:\Program Files"),
+                 os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)")):
+        p = Path(base) / "LibreOffice" / "program" / "soffice.exe"
+        if p.exists():
+            return str(p)
+    return None
+
+
+def _convert_with_soffice(soffice: str, docx: Path, targets: dict) -> list[str]:
+    import subprocess, tempfile
+    done = []
+    for k, p in targets.items():
+        with tempfile.TemporaryDirectory() as td:
+            subprocess.run([soffice, "--headless", f"-env:UserInstallation=file:///{Path(td).as_posix()}/u",
+                            "--convert-to", k, "--outdir", td, str(docx)],
+                           check=True, timeout=900, capture_output=True)
+            res = Path(td) / (docx.stem + "." + k)
+            if not res.exists():
+                raise RuntimeError(f"LibreOffice не создал {res.name}")
+            shutil_move(res, p)
+            done.append(k)
+    return done
+
+
+def shutil_move(src: Path, dst: Path):
+    import shutil
+    if dst.exists():
+        dst.unlink()
+    shutil.move(str(src), str(dst))
+
+
+# ------------------------------------------------------------------ PDF собственной вёрсткой (matplotlib)
+def _write_pdf_mpl(blocks: list, path: Path, title: str):
+    """Запасной путь, если нет Word и LibreOffice: та же структура, страницы А4 альбомные."""
+    enable_win_dll_path()
+    import matplotlib.image as mpimg
+    from matplotlib.backends.backend_pdf import PdfPages
+    from matplotlib.patches import Rectangle
+    PT = 72 / 2.54
+    W, H, M = PAGE_W_CM * PT, PAGE_H_CM * PT, MARGIN_CM * PT
+    TW = W - 2 * M
+    from matplotlib.font_manager import FontProperties, findfont, get_font
+    fonts = {b: get_font(findfont(FontProperties(family="DejaVu Sans", weight="bold" if b else "normal")))
+             for b in (False, True)}
+    _wcache = {}
+
+    def measure(t, size, bold):
+        key = (t, size, bold)
+        if key not in _wcache:
+            f = fonts[bold]
+            f.set_size(size, 72)
+            f.set_text(t, 0.0)
+            _wcache[key] = f.get_width_height()[0] / 64.0 * 1.02
+        return _wcache[key]
+    st = {"title": (17, True), 1: (14, True), 2: (12.5, True), 3: (11.5, True), 4: (11, False), 5: (11, False),
+          "p": (10.5, False), "note": (10.5, False)}
+    matplotlib.rcParams["pdf.fonttype"] = 42          # шрифты TrueType: текст копируется и ищется
+    pdf = PdfPages(path, metadata={"Title": title, "Creator": "oozt_recs.py"})
+    state = {"fig": None, "y": 0.0, "page": 0}
+
+    def wrap(t, size, bold, width_pt):
+        out = []
+        for para in str(t).split("\n"):
+            words = re.split(r"(?<=-)|\s+", para.strip())
+            line = ""
+            for w in [w for w in words if w]:
+                cand = w if not line else (line + w if line.endswith("-") else line + " " + w)
+                if measure(cand, size, bold) <= width_pt:
+                    line = cand
+                    continue
+                if line:
+                    out.append(line)
+                while measure(w, size, bold) > width_pt and len(w) > 1:   # слово длиннее колонки
+                    k = len(w) - 1
+                    while k > 1 and measure(w[:k] + "-", size, bold) > width_pt:
+                        k -= 1
+                    out.append(w[:k] + "-")
+                    w = w[k:]
+                line = w
+            out.append(line)
+        return out
+
+    def new_page():
+        if state["fig"] is not None:
+            finish()
+        fig = plt.figure(figsize=(W / 72, H / 72))
+        state.update(fig=fig, y=H - M, page=state["page"] + 1)
+
+    def finish():
+        fig = state["fig"]
+        fig.text(0.5, (M * 0.45) / H, str(state["page"]), ha="center", va="center", fontsize=8, color="#5F6368")
+        pdf.savefig(fig)
+        plt.close(fig)
+        state["fig"] = None
+
+    def txt(x, y, t, size, bold=False, color="#202124", style="normal"):
+        state["fig"].text(x / W, y / H, t, fontsize=size, fontweight="bold" if bold else "normal",
+                          color=color, va="top", ha="left", fontstyle=style)
+
+    def ensure(h):
+        if state["fig"] is None or state["y"] - h < M:
+            new_page()
+
+    def para(t, size, bold, color="#202124", style="normal", before=0, after=4, keep=0):
+        lines = wrap(t, size, bold, TW)
+        lh = size * 1.3
+        ensure(before + lh * min(len(lines), 2) + keep)
+        state["y"] -= before
+        for ln in lines:
+            ensure(lh)
+            txt(M, state["y"], ln, size, bold, color, style)
+            state["y"] -= lh
+        state["y"] -= after
+
+    def table(hdr, rows, widths, fpt):
+        ws = [w / sum(widths) * TW for w in widths]
+        lh, pad = fpt * 1.25, 2.5
+
+        def row_lines(r, bold):
+            return [wrap(v, fpt, bold, w - 2 * pad - 1) for v, w in zip(r, ws)]
+
+        def draw_row(cells, bold, fill=None):
+            n = max(len(c) for c in cells)
+            h = n * lh + 2 * pad
+            x, y = M, state["y"]
+            for c, w in zip(cells, ws):
+                state["fig"].add_artist(Rectangle((x / W, (y - h) / H), w / W, h / H, transform=state["fig"].transFigure,
+                                                  facecolor=fill or "none", edgecolor="#8C9AA5", linewidth=0.5))
+                for i, ln in enumerate(c):
+                    txt(x + pad, y - pad - i * lh, ln, fpt, bold)
+                x += w
+            state["y"] -= h
+
+        head = row_lines(hdr, True)
+        hh = max(len(c) for c in head) * lh + 2 * pad
+        ensure(hh + 3 * lh)
+        draw_row(head, True, "#E3EAEE")
+        for r in rows:
+            cells = row_lines(r, False)
+            while cells:
+                h = max(len(c) for c in cells) * lh + 2 * pad
+                if state["y"] - h < M:
+                    room = int((state["y"] - M - 2 * pad) / lh)
+                    if room >= 3:                       # длинную строку делим между страницами
+                        draw_row([c[:room] for c in cells], False)
+                        cells = [c[room:] for c in cells]
+                        if not any(cells):
+                            break
+                    new_page()
+                    draw_row(head, True, "#E3EAEE")
+                    continue
+                draw_row(cells, False)
+                break
+        state["y"] -= 6
+
+    def img_size(path):
+        img = mpimg.imread(str(path))
+        ih, iw = img.shape[0], img.shape[1]
+        w = TW - 20
+        h = w * ih / iw
+        max_h = H - 2 * M - 90
+        if h > max_h:
+            w, h = w * max_h / h, max_h
+        return img, w, h
+
+    pending_break = False
+    for i, b in enumerate(blocks):
+        k = b[0]
+        if k == "break":
+            pending_break = True
+            continue
+        if pending_break:
+            new_page()
+            pending_break = False
+        if k == "title":
+            para(b[1], *st["title"], color="#1F3B4D", after=10)
+        elif k == "h":
+            size, bold = st[min(b[1], 5)]
+            keep = {1: 60, 2: 140, 3: 110, 4: 85, 5: 60}[min(b[1], 5)]
+            if i + 1 < len(blocks) and blocks[i + 1][0] == "img":      # заголовок не отрываем от схемы
+                keep = img_size(blocks[i + 1][1])[2] + 8
+            para(b[2], size, bold, color="#1F3B4D" if b[1] <= 2 else "#202124",
+                 style="italic" if b[1] >= 4 else "normal", before=8 if b[1] <= 3 else 0, after=3, keep=keep)
+        elif k == "p":
+            para(b[1], *st["p"])
+        elif k == "note":
+            para(b[1], *st["note"], color="#5F6368", style="italic")
+        elif k == "img":
+            img, w, h = img_size(b[1])
+            ensure(h + 6)
+            x0 = M + (TW - w) / 2
+            ax = state["fig"].add_axes([x0 / W, (state["y"] - h) / H, w / W, h / H])
+            ax.imshow(img, interpolation="lanczos")
+            ax.set_axis_off()
+            state["y"] -= h + 6
+        elif k == "table":
+            table(b[1], b[2], b[3], b[4])
+    if state["fig"] is None:
+        new_page()
+    finish()
+    pdf.close()
+
+
+def _write_report_files(blocks: list, rep: Path, title: str, formats) -> dict:
+    """Записывает report.md и выбранные форматы; возвращает {формат: путь}."""
+    formats = [f for f in (formats or []) if f in REPORT_FORMATS]
+    made = {}
+    _write_md(blocks, rep / "report.md")
+    made["md"] = rep / "report.md"
+    if not formats:
+        return made
+    docx = rep / "report.docx"
+    try:
+        _write_docx(blocks, docx, title)
+        if "docx" in formats:
+            made["docx"] = docx
+            log.info("Отчёт DOCX: %s", docx)
+    except PermissionError:
+        log.warning("report.docx открыт в другой программе — закройте его и пересоберите отчёт (--report-only)")
+        return made
+    targets = {k: rep / f"report.{k}" for k in ("pdf", "doc") if k in formats}
+    methods = []
+    if os.name == "nt":
+        methods.append(("Microsoft Word", lambda t: _convert_with_word(docx, t)))
+    so = _find_soffice()
+    if so:
+        methods.append(("LibreOffice", lambda t: _convert_with_soffice(so, docx, t)))
+    for name, fn in methods:
+        if not targets:
+            break
+        try:
+            for k in fn(dict(targets)):
+                made[k] = targets.pop(k)
+                log.info("Отчёт %s (%s): %s", k.upper(), name, made[k])
+        except ImportError:
+            log.info("%s: нет модуля pywin32 — пропускаю", name)
+        except Exception as e:
+            log.info("%s недоступен для конвертации (%s)", name, str(e).splitlines()[0][:200] if str(e) else type(e).__name__)
+    if "pdf" in targets:
+        try:
+            _write_pdf_mpl(blocks, targets["pdf"], title)
+            made["pdf"] = targets.pop("pdf")
+            log.info("Отчёт PDF (встроенная вёрстка): %s", made["pdf"])
+        except PermissionError:
+            log.warning("report.pdf открыт в другой программе — закройте его и пересоберите отчёт (--report-only)")
+        except Exception as e:
+            log.warning("PDF не создан: %s", e)
+    if "doc" in targets:
+        log.warning("Формат DOC (Word 97–2003) требует установленного Microsoft Word или LibreOffice — не создан")
+    if "docx" not in formats and docx.exists() and "docx" not in made:
+        try:
+            docx.unlink()                       # промежуточный файл, если DOCX не заказан
+        except OSError:
+            pass
+    return made
+
+
+def build_report(data: Data, table: pd.DataFrame, evidence, out_dir: Path, kv_list, basemap=True,
+                 formats=("docx", "pdf")):
+    enable_win_dll_path()
+    cfg = data.cfg
+    rep = out_dir / "report"
+    rep.mkdir(parents=True, exist_ok=True)
+    kv_all = _report_groups_table(data, kv_list)
+    blocks = _report_blocks(data, table, evidence, rep, kv_all, basemap=basemap)
+    title = blocks[0][1]
+    made = _write_report_files(blocks, rep, title, formats)
+    return made.get("pdf") or made.get("docx") or made["md"]
 
 
 # =====================================================================================
@@ -2408,7 +2883,8 @@ def report_only(cfg: Config):
             g = gpd.read_file(gpkg, layer=ly)
             parts.append(g.to_crs(WORK_EPSG))
     ev = gpd.GeoDataFrame(pd.concat(parts, ignore_index=True), crs=WORK_EPSG) if parts else None
-    rep = build_report(data, table, ev, out, cfg.report_kv, basemap=cfg.basemap)
+    rep = build_report(data, table, ev, out, cfg.report_kv, basemap=cfg.basemap,
+                       formats=cfg.report_formats)
     log.info("Готово. Отчёт: %s", rep)
 
 
@@ -2522,7 +2998,8 @@ def run(cfg: Config):
     except Exception as e:
         log.warning("GPKG не записан: %s", e)
 
-    rep = build_report(data, table, ev, out, cfg.report_kv, basemap=cfg.basemap)
+    rep = build_report(data, table, ev, out, cfg.report_kv, basemap=cfg.basemap,
+                       formats=cfg.report_formats)
     log.info("Готово. Таблица: %s; отчёт: %s", out / "measures_long.xlsx", rep)
     return table, rep
 
@@ -2535,6 +3012,8 @@ def main():
     ap.add_argument("--gui", action="store_true",
                     help="открыть окно выбора данных, предзаполненное из --config")
     ap.add_argument("--no-basemap", action="store_true", help="не добавлять подложку OSM")
+    ap.add_argument("--formats", help="форматы отчёта через запятую: docx,pdf,doc (report.md — всегда); "
+                                      "пусто — только Markdown")
     ap.add_argument("--save-config-only", action="store_true", help="только собрать конфиг диалогами и сохранить")
     ap.add_argument("--report-only", action="store_true",
                     help="не пересчитывать: построить отчёт по measures_long.csv и evidence.gpkg из out_dir")
@@ -2548,6 +3027,11 @@ def main():
         cfg.report_kv = [int(x) if x.isdigit() else x for x in re.split(r"[,;\s]+", args.kv) if x]
     if args.no_basemap:
         cfg.basemap = False
+    if args.formats is not None:
+        cfg.report_formats = [x.strip().lower().lstrip(".") for x in re.split(r"[,;\s]+", args.formats) if x.strip()]
+        bad = [x for x in cfg.report_formats if x not in REPORT_FORMATS]
+        if bad:
+            ap.error("неизвестные форматы: " + ", ".join(bad) + " (допустимы: docx, pdf, doc)")
     if args.save_config_only:
         Path(cfg.out_dir).mkdir(parents=True, exist_ok=True)
         cfg.save(Path(cfg.out_dir) / "config.json")
