@@ -3181,7 +3181,8 @@ def _q_srs(epsg: int) -> str:
 
 
 def write_qgis_project(out: Path, cfg: Config, data: "Data", gpkg: Path, terr_layer: str, label_field: str,
-                       measures_layer: str | None, measure_types: list, evidence_layers: list, nmax: int = 0) -> Path:
+                       measures_layer: str | None, measure_types: list, evidence_layers: list, nmax: int = 0,
+                       zones_layer: str | None = None, zone_measures=()) -> Path:
     """Файл проекта QGIS (.qgs, относительные пути) с результатами из evidence.gpkg.
     measure_types: [(тип мероприятий, [мероприятие, …])]; evidence_layers: [(имя слоя gpkg, геометрия, [значения layer])]"""
     import uuid
@@ -3237,6 +3238,17 @@ def write_qgis_project(out: Path, cfg: Config, data: "Data", gpkg: Path, terr_la
                 col = _MEASURE_COLORS[ci % len(_MEASURE_COLORS)]
                 ci += 1
                 subset = '"Мероприятие" = ' + "'" + str(nm).replace("'", "''") + "'"
+                if zones_layer and nm in zone_measures:
+                    # участки работ — заливкой, полигоны с мероприятием — только контуром
+                    kids.append(group(nm, [
+                        add_vec("участки работ", zones_layer, "poly",
+                                _q_single(_q_symbol("fill", "0", col, alpha=0.75, outline=col, outline_width=0.3)),
+                                subset=subset, visible=True),
+                        add_vec("полигоны с мероприятием (контур)", measures_layer, "poly",
+                                _q_single(_q_symbol("fill", "0", col, alpha=0.0, outline=col, outline_width=0.6)),
+                                subset=subset, visible=True),
+                    ], checked=False, expanded=False))
+                    continue
                 kids.append(add_vec(nm, measures_layer, "poly",
                                     _q_single(_q_symbol("fill", "0", col, alpha=0.55, outline=col, outline_width=0.4)),
                                     subset=subset, visible=False))
@@ -3496,6 +3508,42 @@ def run(cfg: Config):
             ml = gpd.GeoDataFrame(ml.rename(columns=disp), geometry="geometry", crs=data.oozt.crs)
             ml.to_crs(4326).to_file(gpkg, layer="measures", driver="GPKG")
             measures_layer = "measures"
+        # участки работ: часть полигона, где выполнено условие мероприятия (пятна-основания ∩ полигон).
+        # Мероприятие назначается полигону целиком, но выполнять его нужно только здесь —
+        # например, укрепление берегов — в полосе у воды, а не по всему крупному полигону.
+        zones_layer, zone_measures = None, set()
+        if not table.empty and ev is not None and not ev.empty:
+            evp = ev[ev.geom_type.isin(["Polygon", "MultiPolygon"])
+                     & ~ev["layer"].astype(str).str.startswith("водные объекты")]
+            mlw = geo.merge(table, on=["ООЗТ", "Квартал", "Выдел"], how="inner")
+            mlw = gpd.GeoDataFrame(mlw, geometry="geometry", crs=data.oozt.crs).to_crs(WORK_EPSG)
+            zparts = []
+            for nm, g in evp.groupby("measure"):
+                sub = mlw[mlw["Мероприятие"] == nm]
+                if sub.empty:
+                    continue
+                u = unary_union(g.geometry.buffer(0).values)
+                z = sub.copy()
+                z["geometry"] = sub.geometry.intersection(u)
+                z = z[~z.is_empty & (z.area > 1)]
+                if z.empty:
+                    continue
+                z["Площадь участка, га"] = (z.area / 1e4).round(3)
+                z["Доля полигона, %"] = (100 * z.area / sub.loc[z.index].area).round(1)
+                zparts.append(z)
+                zone_measures.add(nm)
+            if zparts:
+                zz = gpd.GeoDataFrame(pd.concat(zparts), geometry="geometry", crs=WORK_EPSG)
+                keep = ["ООЗТ", "Квартал", "Выдел", "Тип выдела", "Экосистема", "Тип мероприятий", "Мероприятие",
+                        "Пункт Приказа", "Основание", "Площадь участка, га", "Доля полигона, %", "geometry"]
+                zz = zz[[c for c in keep if c in zz.columns]].rename(columns=disp)
+                zz.to_crs(4326).to_file(gpkg, layer="measure_zones", driver="GPKG")
+                zones_layer = "measure_zones"
+                for nm in sorted(zone_measures):
+                    za = sum(z.area.sum() for z in zparts if z["Мероприятие"].iloc[0] == nm) / 1e4
+                    pa = mlw[mlw["Мероприятие"] == nm].area.sum() / 1e4
+                    log.info("  участки работ «%s»: %.1f га из %.1f га полигонов (%.0f%%)", nm, za, pa,
+                             100 * za / pa if pa else 0)
         ev_layers = []
         if ev is not None and not ev.empty:
             for gt, grp in ev.groupby(ev.geom_type.str.replace("Multi", "")):
@@ -3514,7 +3562,8 @@ def run(cfg: Config):
                         "Пункт Приказа"))["Мероприятие"]))))
             qp = write_qgis_project(out, cfg, data, gpkg, terr_layer,
                                     data.F_ID if cfg.unit_mode == "eco" else "VYD", measures_layer, mt, ev_layers,
-                                    nmax=int(vm["n_measures"].max()) if len(vm) else 0)
+                                    nmax=int(vm["n_measures"].max()) if len(vm) else 0,
+                                    zones_layer=zones_layer, zone_measures=zone_measures)
             log.info("Проект QGIS: %s", qp)
         except Exception as e:
             log.warning("Проект QGIS не создан: %s", e)
