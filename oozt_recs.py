@@ -269,42 +269,74 @@ RULE_REQS = {
 
 
 def classify_measure(measure: dict) -> dict:
-    """Метод выявления → правило. Возвращает {'rule', 'params', 'reason'} (rule=None — не рассчитывается)."""
-    m = (measure.get("method") or "").lower()
+    """Метод выявления → правило. Возвращает {'rule', 'params', 'reason'} (rule=None — не рассчитывается).
+    Правило определяется по тексту метода выявления; название мероприятия используется только там,
+    где метод сам по себе неоднозначен (общий текст «точечные / полигональные / растровые данные»,
+    поиск троп без указания объекта)."""
+    m = re.sub(r"\s+", " ", (measure.get("method") or "").lower())
     nm = (measure.get("name") or "").lower()
     if not m:
         return dict(rule=None, params={}, reason="метод выявления не задан")
     if "нет данных" in m:
         return dict(rule=None, params={}, reason="по таблице: нет данных")
-    if "corvus" in m or "ворон" in nm:
+    water_words = ("водн", "водо", "берег", "акватор", "реки", "ручь", "пруд")
+    species_data = any(w in m for w in ("точечн", "полигональн", "растров"))
+    trails = "троп" in m or "дорог" in m
+    if "corvus" in m or "врано" in m or ("птиц" in m and "плотн" in m):
         return dict(rule="corvus", params={}, reason="")
     if "уклон" in m or "цмр" in m:
         mt = re.search(r"(\d+(?:[.,]\d+)?)\s*%", m)
         thr = float(mt.group(1).replace(",", ".")) if mt else 7.0
         keys = TYPE_MEADOW if "лугов" in m else None
         if keys is None and "люб" in str(measure.get("eco", "")).lower():
-            thr = 7.0
+            thr = float(mt.group(1).replace(",", ".")) if mt else 7.0
         return dict(rule="slope", params=dict(threshold_pct=thr, type_keys=keys), reason="")
-    if ("инвази" in m or "чужерод" in nm or "инвази" in nm) and "троп" not in m:
-        return dict(rule="invasive", params={}, reason="")
-    if "точек видов" in m or ("ликвидация троп" in m and "50" in m):
+    if "точек видов" in m or ("троп" in m and "точ" in m and "50" in m and "вид" in m):
         return dict(rule="rare", params={}, reason="")
-    if "периметр" in m or "берег" in nm or "водо" in m:
+    if ("инвази" in m or "чужерод" in m or "чежерод" in m) or (
+            species_data and not trails and any(w in nm for w in ("инвази", "чужерод", "чежерод"))):
+        return dict(rule="invasive", params={}, reason="")
+    if trails and ("периметр" in m or any(w in m for w in water_words) or "берег" in nm):
         return dict(rule="shore", params={}, reason="")
     if "скольз" in m and "троп" in m:
         return dict(rule="trail_hotspot", params={}, reason="")
-    if "плотност" in m and ("дорог" in m or "троп" in m):
+    if "плотност" in m and trails:
         return dict(rule="trail_density", params={}, reason="")
     if "лугов" in m:
         return dict(rule="type", params=dict(keys=TYPE_MEADOW, label="луговые"), reason="")
-    if "околовод" in m:
+    if "околовод" in m or "болот" in m:
         return dict(rule="type", params=dict(keys=TYPE_WATER + TYPE_NEARWATER, label="водные и околоводные"),
                     reason="")
-    if "водн" in m:
+    if any(w in m for w in ("водн", "водо", "акватор")):
         return dict(rule="type", params=dict(keys=TYPE_WATER, label="водные"), reason="")
     if "лесн" in m:
         return dict(rule="type", params=dict(keys=TYPE_FOREST, label="лесные"), reason="")
+    if "ворон" in nm and "плотн" in m:
+        return dict(rule="corvus", params={}, reason="")
     return dict(rule=None, params={}, reason="метод не распознан")
+
+
+def describe_rule(measure: dict) -> str:
+    """Понятное описание того, как скрипт рассчитывает мероприятие (для отчёта, журнала и окна)."""
+    c = classify_measure(measure)
+    r, pr = c["rule"], c["params"]
+    if r is None:
+        return "не рассчитывается: " + c["reason"]
+    return {
+        "corvus": f"плотность птиц рода Corvus в окне {CORVUS_WINDOW_M:.0f} м ≥ верхнего квартиля; лесные полигоны",
+        "slope": (f"уклон по ЦМР более {pr.get('threshold_pct', 7):g}% "
+                  + ("в луговых полигонах" if pr.get("type_keys") else "в полигонах любого типа")),
+        "invasive": (f"точки и полигоны инвазионных видов; модели SDM — участки с вероятностью "
+                     f"≥ {SDM_THRESHOLD_INVASIVE:.2f}"),
+        "rare": (f"тропы в {RARE_BUFFER_M:.0f} м от точек редких видов, в их полигонах и в зонах SDM "
+                 f"≥ {SDM_THRESHOLD_RARE:.2f}"),
+        "shore": (f"тропы повышенной плотности (окно {TRAIL_WINDOW_M:.0f} м, верхний квартиль) в "
+                  f"{SHORE_BUFFER_M:.0f} м от водных объектов (линии и полигоны гидрографии); полигоны любого типа"),
+        "trail_hotspot": (f"участки повышенной плотности троп (окно {TRAIL_WINDOW_M:.0f} м, верхний квартиль); "
+                          "лесные полигоны"),
+        "trail_density": "плотность троп на полигон (м/га) ≥ верхнего квартиля; лесные полигоны",
+        "type": f"все полигоны типа «{pr.get('label', '')}»",
+    }[r]
 
 
 def _cfg_has(cfg: Config, key: str) -> bool:
@@ -863,7 +895,7 @@ class SetupWindow:
                  f"Вкл/выкл: {'1' if m['on'] else '0'}",
                  f"Метод выявления (Excel): {m.get('method') or '—'}"]
         if rule:
-            lines.append(f"Правило скрипта: {RULE_REQS[rule]['label']}")
+            lines.append(f"Как рассчитывается: {describe_rule(m)}")
             lines.append(f"Нужные данные: {s['need']}")
             if RULE_REQS[rule]["opt"]:
                 lines.append("Дополнительно используется: " + ", ".join(LAYER_TITLE[k] for k in RULE_REQS[rule]["opt"]))
@@ -2380,6 +2412,32 @@ PAGE_W_CM, PAGE_H_CM, MARGIN_CM = 29.7, 21.0, 1.5          # А4 альбомн�
 TEXT_W_CM = PAGE_W_CM - 2 * MARGIN_CM
 
 
+def rules_table(measures, table: pd.DataFrame, cfg: Config) -> pd.DataFrame:
+    """Как рассчитано каждое включённое мероприятие: метод из таблицы → правило скрипта → число полигонов.
+    Позволяет сверить, что название мероприятия и основание назначения соответствуют друг другу."""
+    rows = []
+    cnt = table["Мероприятие"].value_counts() if not table.empty else pd.Series(dtype=int)
+    for m in measures or []:
+        if not m.get("on"):
+            continue
+        n = int(cnt.get(m["name"], 0))
+        extra = [k for k in cnt.index if str(k).startswith(m["name"] + " — ")]
+        note = ""
+        if extra:
+            note = "; " + "; ".join(f"{str(k)[len(m['name']) + 3:]}: {int(cnt[k])}" for k in extra)
+        st = measure_status(m, cfg)
+        rows.append({
+            "Код": m.get("code", ""),
+            "Мероприятие": m["name"],
+            "Пункт Приказа": m.get("prikaz", ""),
+            "Тип экосистемы (по таблице)": m.get("eco", ""),
+            "Метод выявления (из таблицы)": m.get("method") or "",
+            "Как рассчитано скриптом": describe_rule(m),
+            "Назначено полигонов": f"{n}{note}" if st["state"] != "missing" else f"0 ({st['text']})",
+        })
+    return pd.DataFrame(rows)
+
+
 def execution_list(table: pd.DataFrame, cfg: Config, data: "Data | None" = None) -> tuple[pd.DataFrame, str]:
     """Перечень мероприятий к выполнению: одна строка на полигон, мероприятия с пунктами Приказа списком.
     Порядок — по возрастанию поля группировки (индекса), затем ID; для листов сетки и кварталов — см. ниже.
@@ -2443,6 +2501,16 @@ def _report_blocks(data: Data, table: pd.DataFrame, evidence, rep: Path, kv_all:
         hdr = ["Тип мероприятий", "Мероприятие", L["units_n"], L["groups_n"]]
         B += [("h", 1, "Сводка по мероприятиям"),
               ("table", hdr, [[s(r[c]) for c in hdr] for _, r in summ.iterrows()], [5.0, 15.7, 3.0, 3.0], 9)]
+    rt = rules_table(getattr(data, "measures", None), table, cfg)
+    if not rt.empty:
+        hdr2 = ["Код", "Мероприятие", "Метод выявления (из таблицы)", "Как рассчитано скриптом",
+                "Назначено полигонов"]
+        B += [("h", 1, "Как рассчитаны мероприятия"),
+              ("p", "Для каждого включённого мероприятия указан метод выявления из таблицы мероприятий и правило, "
+                    "по которому скрипт его рассчитал. По этой таблице можно проверить, что название мероприятия "
+                    "и основание назначения соответствуют друг другу."),
+              ("table", hdr2, [[s(r[c]) for c in hdr2] for _, r in rt.iterrows()],
+               [1.3, 5.2, 7.4, 7.4, 2.4], 8)]
     report_table = table.rename(columns=_report_rename(cfg))
     group_cols = ["Тип мероприятий", "Тип экосистемы", "Соответствие Пункту Приказа"]
     cols = [L["unit"], L["unit_name"], "Мероприятия", "Основание"]
@@ -3259,6 +3327,10 @@ def report_only(cfg: Config):
     out = Path(cfg.out_dir)
     _setup_logging(out, "report.log")
     data = Data(cfg, oozt_only=True)
+    try:
+        data.measures = read_measures(cfg.measures_xlsx)
+    except Exception as e:
+        log.warning("Таблица мероприятий не прочитана (%s) — раздел «Как рассчитаны мероприятия» пропущен", e)
     # Для схем нужен полный контекст троп, а не только фрагменты,
     # послужившие основанием для назначения мероприятий.
     data.trails = data._load_trails()
@@ -3286,12 +3358,15 @@ def run(cfg: Config):
     _setup_logging(out)
     measures = read_measures(cfg.measures_xlsx)
     data = Data(cfg)
+    data.measures = measures
     cfg.save(out / "config_used.json")
     res = Results()
     log.info("Мероприятия при выбранных данных:")
     for m in measures:
         stt = measure_status(m, cfg)
         log.info("  %-6s %-60s %s", m.get("code", ""), m["name"][:60], stt["text"])
+        if m.get("on"):
+            log.info("         как рассчитывается: %s", describe_rule(m))
     for m in measures:
         if not m["on"]:
             continue
@@ -3311,6 +3386,19 @@ def run(cfg: Config):
     try:
         with pd.ExcelWriter(out / "measures_long.xlsx", engine="openpyxl") as xw:
             table.rename(columns=disp).to_excel(xw, index=False, sheet_name="long")
+            rt = rules_table(measures, table, cfg)
+            if not rt.empty:
+                rt.to_excel(xw, index=False, sheet_name="правила")
+                from openpyxl.styles import Alignment as _Al2, Font as _Ft2
+                wr = xw.book["правила"]
+                wr.freeze_panes = "A2"
+                for i, w in enumerate([8, 40, 10, 18, 60, 60, 22], 1):
+                    wr.column_dimensions[chr(64 + i)].width = w
+                for cell in wr[1]:
+                    cell.font = _Ft2(bold=True)
+                for row in wr.iter_rows():
+                    for cell in row:
+                        cell.alignment = _Al2(wrap_text=True, vertical="top")
             if not table.empty:
                 order_cols = ["ООЗТ", "Квартал", "Выдел", "Тип выдела", "Экосистема",
                               "Тип мероприятий", "Мероприятие", "Тип экосистемы мероприятия",
