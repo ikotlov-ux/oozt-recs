@@ -185,6 +185,7 @@ class Config:
     out_dir: str = ""
     report_kv: list = field(default_factory=list)   # кварталы / листы / группы для отчёта; пусто = все
     basemap: bool = True
+    split_multipart: bool = True         # многочастный объект → отдельные контуры (ID-1, ID-2, …)
     report_formats: list = field(default_factory=lambda: ["docx", "pdf"])  # docx, pdf, doc; report.md — всегда
     fields: dict = field(default_factory=dict)      # kv_vyd: OOZT, KV, VYD, TYPE, NAME; eco: ID, TYPE, NAME, OOZT
 
@@ -617,6 +618,10 @@ class SetupWindow:
         self.v_basemap = tk.BooleanVar(value=True)
         ttk.Checkbutton(s5, text="Подложка OpenStreetMap на схемах (нужен интернет)",
                         variable=self.v_basemap).pack(anchor="w", pady=(6, 0))
+        self.v_split = tk.BooleanVar(value=True)
+        ttk.Checkbutton(s5, text="Делить многочастные объекты на отдельные контуры (ID-1, ID-2, …) — "
+                                 "мероприятие назначается каждому контуру",
+                        variable=self.v_split).pack(anchor="w", pady=(4, 0))
         r = ttk.Frame(s5); r.pack(fill="x", pady=(6, 0))
         ttk.Label(r, text="Отчёт:", width=8).pack(side="left")
         self.v_formats = {k: tk.BooleanVar(value=k in ("docx", "pdf")) for k in REPORT_FORMATS}
@@ -806,6 +811,7 @@ class SetupWindow:
         c.report_kv = [x.strip() for x in re.split(r"[,;\s]+", self.v_kv.get()) if x.strip()]
         c.report_kv = [int(x) if x.isdigit() else x for x in c.report_kv]
         c.basemap = bool(self.v_basemap.get())
+        c.split_multipart = bool(self.v_split.get())
         c.report_formats = [k for k, v in self.v_formats.items() if v.get()]
         return c
 
@@ -915,6 +921,7 @@ class SetupWindow:
         self.v_out.set(cfg.out_dir or "")
         self.v_kv.set(", ".join(map(str, cfg.report_kv or [])))
         self.v_basemap.set(bool(cfg.basemap))
+        self.v_split.set(bool(getattr(cfg, "split_multipart", True)))
         for k, v in self.v_formats.items():
             v.set(k in (cfg.report_formats or []))
         self.field_vars = {}
@@ -1343,6 +1350,42 @@ def _maybe_int(sr: pd.Series) -> pd.Series:
     return sr.astype(str).str.strip()
 
 
+MIN_PART_HA = 0.01      # контур многочастного объекта меньше этой площади — не отдельная единица
+
+
+def _split_multipart(g: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
+    """Многочастный полигон → отдельные контуры. Мелкие части (< MIN_PART_HA) остаются при крупнейшем контуре."""
+    from shapely.geometry import MultiPolygon
+    rows = []
+    for i, (idx, r) in enumerate(g.iterrows()):
+        geom = r.geometry
+        parts = list(geom.geoms) if geom.geom_type == "MultiPolygon" else [geom]
+        parts.sort(key=lambda x: -x.area)
+        big = [p for p in parts if p.area / 1e4 >= MIN_PART_HA] or parts[:1]
+        small = [p for p in parts if p not in big]
+        if small:
+            # мелкие части — к ближайшему крупному контуру
+            groups = [[b] for b in big]
+            for sp in small:
+                k = min(range(len(big)), key=lambda j: big[j].distance(sp))
+                groups[k].append(sp)
+            big = [grp[0] if len(grp) == 1 else MultiPolygon(grp) for grp in groups]
+        for k, p in enumerate(big, 1):
+            rr = r.copy()
+            rr["geometry"] = p
+            rr["_part"], rr["_nparts"], rr["_src_row"] = k, len(big), i
+            rows.append(rr)
+    return gpd.GeoDataFrame(rows, geometry="geometry", crs=g.crs).reset_index(drop=True)
+
+
+def _part_ids(ids: pd.Series, g: gpd.GeoDataFrame) -> pd.Series:
+    """ID контура: исходный ID, для частей многочастного объекта — «ID-1», «ID-2», …"""
+    multi = g["_nparts"] > 1
+    out = ids.copy().astype(object)
+    out[multi] = ids[multi].astype(str) + "-" + g.loc[multi, "_part"].astype(str)
+    return out
+
+
 class Data:
     """Все загруженные слои в WORK_EPSG + служебные объекты."""
 
@@ -1388,6 +1431,9 @@ class Data:
         cfg = self.cfg
         g = read_vector(cfg.oozt_path, cfg.oozt_layer)
         g = g[g.geom_type.isin(["Polygon", "MultiPolygon"])].copy()
+        g["_part"], g["_nparts"] = 1, 1
+        if getattr(cfg, "split_multipart", True):
+            g = _split_multipart(g)
         f = cfg.fields or {}
         cols = list(g.columns)
 
@@ -1413,8 +1459,9 @@ class Data:
             self.F_OOZT = pick("OOZT", spec["OOZT"][1], required=False)
             cfg.fields = {k: v for k, v in {"ID": self.F_ID, "TYPE": self.F_TYPE, "NAME": self.F_NAME,
                                             "OOZT": self.F_OOZT}.items() if v}
-            if g[self.F_ID].duplicated().any():
-                dup = g.loc[g[self.F_ID].duplicated(keep=False), self.F_ID].astype(str).unique()[:10]
+            _dup = g[[self.F_ID, "_part"]].duplicated()
+            if _dup.any():
+                dup = g.loc[_dup, self.F_ID].astype(str).unique()[:10]
                 raise ValueError(f"Поле ID «{self.F_ID}» не уникально: повторы {', '.join(dup)}")
             gf = cfg.report_group_field
             if gf and gf not in cols:
@@ -1428,6 +1475,7 @@ class Data:
                 g["OOZT"] = cfg.oozt_name or Path(cfg.oozt_path).stem
             else:
                 g["OOZT"] = g[self.F_OOZT].astype(str).str.strip()
+            g[self.F_ID] = _part_ids(g[self.F_ID], g)
             g["VYD"] = g[self.F_ID]
             g["Type"] = g[self.F_TYPE]
             if not self.F_NAME:
@@ -1445,6 +1493,13 @@ class Data:
                                   self.F_TYPE: "Type", **({self.F_NAME: "Name"} if self.F_NAME else {})})
             if not self.F_NAME:
                 g["Name"] = g["Type"]
+            g["VYD"] = _part_ids(g["VYD"], g)
+        n_split = int((g["_nparts"] > 1).sum())
+        if n_split:
+            log.info("Многочастные объекты разделены на отдельные контуры: %d объектов → %d контуров "
+                     "(ID-1, ID-2, …; контуры < %.2f га присоединены к соседнему крупному контуру)",
+                     g.loc[g["_nparts"] > 1, "_src_row"].nunique(), n_split, MIN_PART_HA)
+        g = g.drop(columns=["_part", "_nparts", "_src_row"], errors="ignore")
         for c in ("KV", "VYD"):
             g[c] = _maybe_int(g[c])
         if cfg.unit_mode != "eco":
@@ -3586,6 +3641,8 @@ def main():
     ap.add_argument("--no-basemap", action="store_true", help="не добавлять подложку OSM")
     ap.add_argument("--formats", help="форматы отчёта через запятую: docx,pdf,doc (report.md — всегда); "
                                       "пусто — только Markdown")
+    ap.add_argument("--no-split", action="store_true",
+                    help="не делить многочастные объекты слоя территории на отдельные контуры")
     ap.add_argument("--save-config-only", action="store_true", help="только собрать конфиг диалогами и сохранить")
     ap.add_argument("--report-only", action="store_true",
                     help="не пересчитывать: построить отчёт по measures_long.csv и evidence.gpkg из out_dir")
@@ -3599,6 +3656,8 @@ def main():
         cfg.report_kv = [int(x) if x.isdigit() else x for x in re.split(r"[,;\s]+", args.kv) if x]
     if args.no_basemap:
         cfg.basemap = False
+    if args.no_split:
+        cfg.split_multipart = False
     if args.formats is not None:
         cfg.report_formats = [x.strip().lower().lstrip(".") for x in re.split(r"[,;\s]+", args.formats) if x.strip()]
         bad = [x for x in cfg.report_formats if x not in REPORT_FORMATS]
