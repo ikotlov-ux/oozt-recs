@@ -185,6 +185,7 @@ class Config:
     out_dir: str = ""
     report_kv: list = field(default_factory=list)   # кварталы / листы / группы для отчёта; пусто = все
     basemap: bool = True
+    shore_min_share_pct: float = 25.0    # укрепление берегов: мин. доля полигона под тропами у воды, %
     split_multipart: bool = True         # многочастный объект → отдельные контуры (ID-1, ID-2, …)
     report_formats: list = field(default_factory=lambda: ["docx", "pdf"])  # docx, pdf, doc; report.md — всегда
     fields: dict = field(default_factory=dict)      # kv_vyd: OOZT, KV, VYD, TYPE, NAME; eco: ID, TYPE, NAME, OOZT
@@ -328,6 +329,9 @@ def classify_measure(measure: dict) -> dict:
     return dict(rule=None, params={}, reason="метод не распознан")
 
 
+_SHORE_SHARE = [25.0]     # текущий порог для описания правила (обновляется из конфигурации)
+
+
 def describe_rule(measure: dict) -> str:
     """Понятное описание того, как скрипт рассчитывает мероприятие (для отчёта, журнала и окна)."""
     c = classify_measure(measure)
@@ -343,7 +347,8 @@ def describe_rule(measure: dict) -> str:
         "rare": (f"тропы в {RARE_BUFFER_M:.0f} м от точек редких видов, в их полигонах и в зонах SDM "
                  f"≥ {SDM_THRESHOLD_RARE:.2f}"),
         "shore": (f"тропы повышенной плотности (окно {TRAIL_WINDOW_M:.0f} м, верхний квартиль) в "
-                  f"{SHORE_BUFFER_M:.0f} м от водных объектов (линии и полигоны гидрографии); полигоны любого типа"),
+                  f"{SHORE_BUFFER_M:.0f} м от водных объектов (линии и полигоны гидрографии); полигоны любого типа, "
+                  f"если такой участок занимает ≥ {_SHORE_SHARE[0]:g}% площади полигона"),
         "trail_hotspot": (f"участки повышенной плотности троп (окно {TRAIL_WINDOW_M:.0f} м, верхний квартиль); "
                           "лесные полигоны"),
         "trail_density": "плотность троп на полигон (м/га) ≥ верхнего квартиля; лесные полигоны",
@@ -629,6 +634,11 @@ class SetupWindow:
         self.v_basemap = tk.BooleanVar(value=True)
         ttk.Checkbutton(s5, text="Подложка OpenStreetMap на схемах (нужен интернет)",
                         variable=self.v_basemap).pack(anchor="w", pady=(6, 0))
+        r = ttk.Frame(s5); r.pack(fill="x", pady=(4, 0))
+        ttk.Label(r, text="Укрепление берегов: участок троп у воды не меньше").pack(side="left")
+        self.v_shore = tk.StringVar(value="25")
+        ttk.Entry(r, textvariable=self.v_shore, width=5).pack(side="left", padx=4)
+        ttk.Label(r, text="% площади полигона (0 — без порога)").pack(side="left")
         self.v_split = tk.BooleanVar(value=True)
         ttk.Checkbutton(s5, text="Делить многочастные объекты на отдельные контуры (ID-1, ID-2, …) — "
                                  "мероприятие назначается каждому контуру",
@@ -823,6 +833,10 @@ class SetupWindow:
         c.report_kv = [int(x) if x.isdigit() else x for x in c.report_kv]
         c.basemap = bool(self.v_basemap.get())
         c.split_multipart = bool(self.v_split.get())
+        try:
+            c.shore_min_share_pct = max(0.0, float(self.v_shore.get().replace(",", ".") or 0))
+        except ValueError:
+            c.shore_min_share_pct = 25.0
         c.report_formats = [k for k, v in self.v_formats.items() if v.get()]
         return c
 
@@ -933,6 +947,7 @@ class SetupWindow:
         self.v_kv.set(", ".join(map(str, cfg.report_kv or [])))
         self.v_basemap.set(bool(cfg.basemap))
         self.v_split.set(bool(getattr(cfg, "split_multipart", True)))
+        self.v_shore.set(f"{float(getattr(cfg, 'shore_min_share_pct', 25.0)):g}")
         for k, v in self.v_formats.items():
             v.set(k in (cfg.report_formats or []))
         self.field_vars = {}
@@ -1782,10 +1797,15 @@ def rule_shore_trails(data: Data, res: Results, measure: dict):
     hot_shore["geometry"] = hot_shore.geometry.intersection(shore)
     hot_shore = hot_shore[~hot_shore.is_empty]
     hit = _overlay_patches_to_vydels(data, hot_shore, data.oozt, min_ha=MIN_PATCH_HA / 5)
+    thr = float(getattr(data.cfg, "shore_min_share_pct", 0) or 0)
+    n_all = len(hit)
+    if thr > 0:
+        hit = hit[hit["share"] * 100 >= thr]
+        log.info("  порог: участок у воды ≥ %g%% площади полигона — оставлено %d из %d", thr, len(hit), n_all)
     for _, h in hit.iterrows():
         r = data.oozt[data.oozt["uid"] == h["uid"]].iloc[0]
         res.add(r, measure, f"тропы повышенной плотности в {SHORE_BUFFER_M:.0f} м от водных объектов: "
-                            f"{h['patch_ha']:.2f} га", round(h["patch_ha"], 2))
+                            f"{h['patch_ha']:.2f} га ({100 * h['share']:.0f}% полигона)", round(h["patch_ha"], 2))
     res.add_evidence(hot_shore, measure["name"],
                      f"тропы на расстоянии {SHORE_BUFFER_M:.0f} м от водных объектов (Q75)")
     # сами водные объекты рядом с найденными участками — как контекст на схеме
@@ -2461,8 +2481,10 @@ def _fig_name(oozt, kv) -> str:
 
 def _params_line() -> str:
     return ("Параметры: окно плотности троп %.0f м, окно плотности врановых %.0f м, буфер от точек редких видов "
-            "%.0f м, порог SDM %.2f (инвазионные) / %.2f (редкие), верхний квартиль — по всем ООЗТ."
-            % (TRAIL_WINDOW_M, CORVUS_WINDOW_M, RARE_BUFFER_M, SDM_THRESHOLD_INVASIVE, SDM_THRESHOLD_RARE))
+            "%.0f м, порог SDM %.2f (инвазионные) / %.2f (редкие), верхний квартиль — по всем ООЗТ; "
+            "укрепление берегов — участок троп у воды не меньше %g%% площади полигона."
+            % (TRAIL_WINDOW_M, CORVUS_WINDOW_M, RARE_BUFFER_M, SDM_THRESHOLD_INVASIVE, SDM_THRESHOLD_RARE,
+               _SHORE_SHARE[0]))
 
 
 def _summary_table(table: pd.DataFrame, L: dict) -> pd.DataFrame:
@@ -2478,6 +2500,7 @@ TEXT_W_CM = PAGE_W_CM - 2 * MARGIN_CM
 def rules_table(measures, table: pd.DataFrame, cfg: Config) -> pd.DataFrame:
     """Как рассчитано каждое включённое мероприятие: метод из таблицы → правило скрипта → число полигонов.
     Позволяет сверить, что название мероприятия и основание назначения соответствуют друг другу."""
+    _SHORE_SHARE[0] = float(getattr(cfg, "shore_min_share_pct", 0) or 0)
     rows = []
     cnt = table["Мероприятие"].value_counts() if not table.empty else pd.Series(dtype=int)
     for m in measures or []:
@@ -3431,6 +3454,7 @@ def run(cfg: Config):
     out = Path(cfg.out_dir)
     out.mkdir(parents=True, exist_ok=True)
     _setup_logging(out)
+    _SHORE_SHARE[0] = float(getattr(cfg, "shore_min_share_pct", 0) or 0)
     measures = read_measures(cfg.measures_xlsx)
     data = Data(cfg)
     data.measures = measures
