@@ -21,7 +21,9 @@ oozt_recs.py — подготовка природоохранных реком�
 Выходные данные (папка out_dir)
 -------------------------------
     measures_long.xlsx / .csv   — длинная таблица ООЗТ–Квартал(Лист)–Выдел(ID)–Мероприятие (+ основание)
-    evidence.gpkg               — слои-основания + полигоны с мероприятиями (vydel_measures / eco_measures)
+    evidence.gpkg               — полигоны с мероприятиями (vydel_measures / eco_measures), measures (полигон × мероприятие),
+                                  слои-основания evidence_*
+    oozt_measures.qgs           — проект QGIS с этими слоями и стилями (относительные пути)
     report/report.md            — отчёт по кварталам или листам (схема + таблицы), рисунки report/fig_*.png
     report/report.docx, .pdf    — тот же отчёт в Word и PDF (report_formats / --formats; .doc — по запросу)
     config_used.json            — конфигурация запуска (можно передать в --config)
@@ -1272,6 +1274,32 @@ def upper_quantile_mask(density: np.ndarray, inside: np.ndarray, q=QUANTILE):
 # =====================================================================================
 #                                 КОНТЕКСТ ДАННЫХ
 # =====================================================================================
+def _nat_key(v):
+    """Естественный порядок: числа — по значению (1110 < 5110 < 44504), текст — по фрагментам
+    («кв2» < «кв10», «5-12» < «5-110»)."""
+    s_ = "" if v is None or (isinstance(v, float) and np.isnan(v)) else str(v).strip()
+    try:
+        return (0, float(s_.replace(",", ".")), ())
+    except ValueError:
+        pass
+    parts = tuple((0, int(p), "") if p.isdigit() else (1, 0, p.lower()) for p in re.split(r"(\d+)", s_) if p)
+    return (1, 0.0, parts)
+
+
+def _nat_rank(values) -> np.ndarray:
+    """Ранги значений в естественном порядке (для сортировки смешанных / текстовых полей)."""
+    vals = ["" if pd.isna(v) else str(v).strip() for v in values]
+    order = {v: i for i, v in enumerate(sorted(set(vals), key=_nat_key))}
+    return np.array([order[v] for v in vals], dtype=np.int64)
+
+
+def _nat_sort_key(*cols):
+    """key= для DataFrame.sort_values: указанные колонки — в естественном порядке."""
+    def key(sr: pd.Series):
+        return pd.Series(_nat_rank(sr.values), index=sr.index) if sr.name in cols else sr
+    return key
+
+
 def _maybe_int(sr: pd.Series) -> pd.Series:
     """Номера кварталов/выделов/ID → Int64, если все значения целые; иначе — текст как есть."""
     try:
@@ -1388,7 +1416,8 @@ class Data:
         for c in ("KV", "VYD"):
             g[c] = _maybe_int(g[c])
         if cfg.unit_mode != "eco":
-            g["KV_SORT"] = g["KV"]
+            g["KV_SORT"] = _nat_rank(g["KV"])
+        g["VYD_SORT"] = _nat_rank(g["VYD"])
         g["Type"] = g["Type"].astype(str).str.strip()
         g["Name"] = g["Name"].astype(str).str.strip()
         g["uid"] = g["OOZT"].astype(str) + "|" + g["KV"].astype(str) + "|" + g["VYD"].astype(str)
@@ -1405,7 +1434,7 @@ class Data:
         cfg = self.cfg
         self.sheet_grid = None
         if grp_vals is not None:
-            return grp_vals, grp_vals
+            return grp_vals, _nat_rank(grp_vals)
         size = float(cfg.sheet_size_m or 1000.0)
         minx, miny, maxx, maxy = g.total_bounds
         pts = g.geometry.representative_point()
@@ -1496,6 +1525,7 @@ class Results:
         self.rows.append({
             "ООЗТ": vydel_row["OOZT"], "Квартал": vydel_row["KV"], "Выдел": vydel_row["VYD"],
             "_sort": vydel_row.get("KV_SORT", vydel_row["KV"]),
+            "_vsort": vydel_row.get("VYD_SORT", 0),
             "Тип выдела": vydel_row["Type"], "Экосистема": vydel_row["Name"],
             "Тип мероприятий": measure.get("group", ""), "Мероприятие": measure["name"],
             "Тип экосистемы мероприятия": measure.get("eco", ""),
@@ -1519,13 +1549,13 @@ class Results:
         # объединяем дубли (один выдел — одно мероприятие) с конкатенацией оснований
         key = ["ООЗТ", "Квартал", "Выдел", "Мероприятие"]
         agg = df.groupby(key, as_index=False, sort=False).agg({
-            "Тип выдела": "first", "Экосистема": "first", "Тип мероприятий": "first", "_sort": "first",
+            "Тип выдела": "first", "Экосистема": "first", "Тип мероприятий": "first", "_sort": "first", "_vsort": "first",
             "Тип экосистемы мероприятия": "first",
             "Пункт Приказа": "first", "Сезонность": "first",
             "Основание": lambda s: "; ".join(dict.fromkeys([x for x in s if x])),
             "Значение": "first",
         })
-        agg = agg.sort_values(["ООЗТ", "_sort", "Выдел", "Тип мероприятий", "Мероприятие"])
+        agg = agg.sort_values(["ООЗТ", "_sort", "_vsort", "Тип мероприятий", "Мероприятие"])
         cols = ["ООЗТ", "Квартал", "Выдел", "Тип выдела", "Экосистема", "Тип мероприятий", "Мероприятие",
                 "Тип экосистемы мероприятия", "Пункт Приказа", "Сезонность", "Основание", "Значение"]
         return agg[cols].reset_index(drop=True)
@@ -2073,6 +2103,69 @@ def _legend_label(layer: str) -> str:
     return layer
 
 
+def _place_labels(ax, items, sizes=(11, 10, 9, 8, 7), leaders=True, max_labels=150):
+    """Подписи полигонов без наложений.
+    items: [(текст, геометрия)] в порядке приоритета. Подпись ставится внутрь полигона, если помещается
+    (перебор кеглей sizes); иначе — рядом с полигоном с выноской; если и так не помещается — пропускается.
+    Возвращает число размещённых подписей."""
+    import matplotlib.patheffects as pe
+    from shapely.geometry import box as _box
+    fig = ax.figure
+    ax.apply_aspect()
+    pos = ax.get_position()
+    x0, x1 = ax.get_xlim()
+    y0, y1 = ax.get_ylim()
+    m_per_pt = (x1 - x0) / (pos.width * fig.get_figwidth() * 72)
+    frame = _box(x0, y0, x1, y1)
+    placed = []
+    halo = [pe.withStroke(linewidth=2.6, foreground="white")]
+
+    def lbl_box(cx, cy, t, fs):
+        hw = (len(t) * fs * 0.62 + 3) * m_per_pt / 2
+        hh = (fs * 1.05 + 2) * m_per_pt / 2
+        return _box(cx - hw, cy - hh, cx + hw, cy + hh)
+
+    def free(b):
+        return frame.contains(b) and not any(b.intersects(q) for q in placed)
+    n = 0
+    for t, geom in items:
+        if n >= max_labels:
+            break
+        if geom is None or geom.is_empty:
+            continue
+        p = geom.representative_point()
+        done = False
+        for fs in sizes:                                   # 1) внутри полигона
+            b = lbl_box(p.x, p.y, t, fs)
+            if geom.buffer(fs * 0.25 * m_per_pt).contains(b) and free(b):
+                ax.annotate(t, (p.x, p.y), ha="center", va="center", fontsize=fs, fontweight="bold",
+                            color="#111111", zorder=13, path_effects=halo)
+                placed.append(b); done = True
+                break
+        if done or not leaders:
+            n += done
+            continue
+        fs = sizes[-1] + 1                                 # 2) рядом с выноской
+        gx0, gy0, gx1, gy1 = geom.bounds
+        b0 = lbl_box(0, 0, t, fs)
+        bw, bh = b0.bounds[2] - b0.bounds[0], b0.bounds[3] - b0.bounds[1]
+        off = 6 * m_per_pt
+        cands = [(gx1 + off + bw / 2, (gy0 + gy1) / 2), (gx0 - off - bw / 2, (gy0 + gy1) / 2),
+                 ((gx0 + gx1) / 2, gy1 + off + bh / 2), ((gx0 + gx1) / 2, gy0 - off - bh / 2),
+                 (gx1 + off + bw / 2, gy1 + off + bh / 2), (gx0 - off - bw / 2, gy1 + off + bh / 2),
+                 (gx1 + off + bw / 2, gy0 - off - bh / 2), (gx0 - off - bw / 2, gy0 - off - bh / 2),
+                 (gx1 + 3 * off + bw / 2, (gy0 + gy1) / 2), (gx0 - 3 * off - bw / 2, (gy0 + gy1) / 2)]
+        for cx, cy in cands:
+            b = lbl_box(cx, cy, t, fs)
+            if free(b):
+                ax.annotate(t, xy=(p.x, p.y), xytext=(cx, cy), textcoords="data", ha="center", va="center",
+                            fontsize=fs, fontweight="bold", color="#111111", zorder=13, path_effects=halo,
+                            arrowprops=dict(arrowstyle="-", color="#333333", lw=0.6, shrinkA=0, shrinkB=0))
+                placed.append(b); n += 1
+                break
+    return n
+
+
 def draw_kvartal(data: Data, evidence: gpd.GeoDataFrame | None, kv, oozt_name, out_png: Path, basemap=True):
     vyd = data.oozt[(data.oozt["KV"] == kv) & (data.oozt["OOZT"] == oozt_name)]
     if vyd.empty:
@@ -2089,9 +2182,19 @@ def draw_kvartal(data: Data, evidence: gpd.GeoDataFrame | None, kv, oozt_name, o
 
     # Лесные выделы имеют зелёную заливку, луговые прозрачны.
     # Границы всех выделов повторно рисуются поверх тематических слоёв ниже.
-    forest = vyd[vyd["Type"].astype(str).str.lower().str.contains("лес", regex=False)]
+    cfg = data.cfg
+    group_mode = cfg.unit_mode == "eco" and bool(cfg.report_group_field)   # индекс = тип, полигоны разбросаны
+    map_box0 = box(ext[0], ext[2], ext[1], ext[3])
+    same_oozt0 = data.oozt[data.oozt["OOZT"] == oozt_name]
+    others = same_oozt0[(same_oozt0["KV"] != kv) & same_oozt0.intersects(map_box0)]
+    if cfg.unit_mode == "eco" and not others.empty:      # прочие полигоны — тонкий контур без подписей
+        others.boundary.plot(ax=ax, color="#9AA0A6", linewidth=0.45, zorder=3)
+    is_forest = vyd["Type"].astype(str).str.lower().str.contains("лес", regex=False)
+    forest = vyd[is_forest]
     if not forest.empty:
         forest.plot(ax=ax, color="#b7dfb0", edgecolor="none", alpha=0.55, zorder=1)
+    if group_mode and (~is_forest).any():
+        vyd[~is_forest].plot(ax=ax, color="#F6E3A1", edgecolor="none", alpha=0.6, zorder=1)
     # все тропы в окне карты — тонкий серый контекстный слой
     if data.trails is not None and not data.trails.empty:
         map_box = box(ext[0], ext[2], ext[1], ext[3])
@@ -2102,6 +2205,15 @@ def draw_kvartal(data: Data, evidence: gpd.GeoDataFrame | None, kv, oozt_name, o
     handles = []
     if data.trails is not None and not data.trails.empty:
         handles.append(Line2D([], [], color="#707070", linewidth=1.0, label="все тропы"))
+    if cfg.unit_mode == "eco":
+        grp_name = f"полигоны {unit_labels(cfg)['group'].lower()} {kv}" if group_mode else f"полигоны листа {kv}"
+        if is_forest.any():
+            handles.append(Patch(facecolor="#b7dfb0", alpha=0.7, edgecolor="#333333", label=grp_name + " — лесные"))
+        if (~is_forest).any():
+            handles.append(Patch(facecolor="#F6E3A1" if group_mode else "none", alpha=0.7, edgecolor="#333333",
+                                 label=grp_name + (" — прочие" if is_forest.any() else "")))
+        if not others.empty:
+            handles.append(Patch(facecolor="none", edgecolor="#9AA0A6", label="прочие полигоны"))
     used_layers = []
     if evidence is not None and not evidence.empty:
         kv_geom = unary_union(vyd.geometry.values)
@@ -2136,17 +2248,18 @@ def draw_kvartal(data: Data, evidence: gpd.GeoDataFrame | None, kv, oozt_name, o
                                      label=_legend_label(layer)))
             used_layers.append(layer)
     # границы выделов поверх всех тематических слоёв
-    vyd.boundary.plot(ax=ax, color="#333333", linewidth=1.15, zorder=8)
+    vyd.boundary.plot(ax=ax, color="#222222", linewidth=1.6 if group_mode else 1.15, zorder=8)
     # подписи выделов
-    lab_fs = 13 if len(vyd) <= 30 else (10 if len(vyd) <= 80 else 7)
-    for _, r in vyd.iterrows():
-        p = r.geometry.representative_point()
-        ax.annotate(str(r["VYD"]), (p.x, p.y), ha="center", va="center", fontsize=lab_fs, fontweight="bold",
-                    color="#111111", zorder=11)
-    # соседние кварталы: границы и номера в пределах окна карты
+    ax.set_xlim(ext[0], ext[1]); ax.set_ylim(ext[2], ext[3])
+    lab_items = [(str(r["VYD"]).removesuffix(".0"), r.geometry)
+                 for _, r in vyd.assign(_a=vyd.geometry.area).sort_values("_a", ascending=False).iterrows()]
+    # соседние кварталы / листы: границы и номера в пределах окна карты (в режиме индексов — не нужны)
     map_box = box(ext[0], ext[2], ext[1], ext[3])
     same_oozt = data.oozt[data.oozt["OOZT"] == oozt_name]
     neighbors = same_oozt[(same_oozt["KV"] != kv) & same_oozt.intersects(map_box)]
+    if group_mode:
+        neighbors = neighbors.iloc[0:0]
+    import matplotlib.patheffects as pe
     for n_kv, ng in neighbors.groupby("KV"):
         ngeom = unary_union(ng.geometry.values)
         clipped = ngeom.intersection(map_box)
@@ -2156,13 +2269,14 @@ def draw_kvartal(data: Data, evidence: gpd.GeoDataFrame | None, kv, oozt_name, o
             ax=ax, color="#444444", linewidth=1.5, linestyle="--", zorder=9)
         p = clipped.representative_point()
         px = float(np.clip(p.x, ext[0] + w * 0.07, ext[1] - w * 0.07))
-        py = float(np.clip(p.y, ext[2] + h * 0.09, ext[3] - h * 0.07))
+        py = float(np.clip(p.y, ext[2] + h * (0.15 if px < ext[0] + w * 0.35 else 0.09), ext[3] - h * 0.07))
         n_label = str(n_kv).removesuffix(".0")
-        ax.annotate(n_label, (px, py), ha="center", va="center",
-                    fontsize=16, fontweight="bold", color="#222222", zorder=12)
-    # граница квартала в фокусе
-    gpd.GeoSeries([focus_geom], crs=WORK_EPSG).boundary.plot(
-        ax=ax, color="black", linewidth=2.4, zorder=10)
+        ax.annotate(n_label, (px, py), ha="center", va="center", fontsize=14, fontweight="bold",
+                    color="#555555", zorder=12, path_effects=[pe.withStroke(linewidth=3, foreground="white")])
+    # граница квартала / листа в фокусе (у разбросанных полигонов индекса совпадает с их контурами)
+    if not group_mode:
+        gpd.GeoSeries([focus_geom], crs=WORK_EPSG).boundary.plot(
+            ax=ax, color="black", linewidth=2.4, zorder=10)
     ax.set_xlim(ext[0], ext[1]); ax.set_ylim(ext[2], ext[3])
     if basemap:
         try:
@@ -2196,10 +2310,19 @@ def draw_kvartal(data: Data, evidence: gpd.GeoDataFrame | None, kv, oozt_name, o
     dec = 10 ** np.floor(np.log10(target))
     L = next(m * dec for m in (5, 2, 1) if m * dec <= target) if target >= dec else dec
     x0, y0 = ext[0] + w * 0.04, ext[2] + h * 0.04
-    ax.plot([x0, x0 + L], [y0, y0], color="black", linewidth=4, zorder=11)
-    ax.text(x0 + L / 2, y0 + h * 0.012, f"{int(L)} м", ha="center", fontsize=12, zorder=11,
-            bbox=dict(fc="white", ec="none", alpha=0.7, pad=1))
+    ax.plot([x0, x0 + L], [y0, y0], color="black", linewidth=4, zorder=14,
+            path_effects=[pe.withStroke(linewidth=6.5, foreground="white")])
+    ax.text(x0 + L / 2, y0 + h * 0.022, f"{int(L)} м", ha="center", va="bottom", fontsize=12, zorder=14,
+            path_effects=[pe.withStroke(linewidth=3, foreground="white")])
     fig.tight_layout()
+    ax.set_xlim(ext[0], ext[1]); ax.set_ylim(ext[2], ext[3])
+    # подписи полигонов — последними, когда известен масштаб и оформление осей
+    n_lab = _place_labels(ax, lab_items, sizes=(13, 12, 11, 10, 9, 8) if cfg.unit_mode != "eco" else (10, 9, 8, 7),
+                          leaders=True)
+    if n_lab < len(lab_items):
+        ax.text(0.995, 0.005, f"подписаны {n_lab} из {len(lab_items)} полигонов; полный перечень — в таблице",
+                transform=ax.transAxes, ha="right", va="bottom", fontsize=9, color="#444444", zorder=14,
+                path_effects=[pe.withStroke(linewidth=3, foreground="white")])
     fig.savefig(out_png, bbox_inches="tight")
     plt.close(fig)
     return used_layers
@@ -2257,6 +2380,46 @@ PAGE_W_CM, PAGE_H_CM, MARGIN_CM = 29.7, 21.0, 1.5          # А4 альбомн�
 TEXT_W_CM = PAGE_W_CM - 2 * MARGIN_CM
 
 
+def execution_list(table: pd.DataFrame, cfg: Config, data: "Data | None" = None) -> tuple[pd.DataFrame, str]:
+    """Перечень мероприятий к выполнению: одна строка на полигон, мероприятия с пунктами Приказа списком.
+    Порядок — по возрастанию поля группировки (индекса), затем ID; для листов сетки и кварталов — см. ниже.
+    Возвращает (таблица с подписями колонок, описание порядка)."""
+    L = unit_labels(cfg)
+    if table is None or table.empty:
+        return pd.DataFrame(), ""
+    t = table.copy()
+    def _with_clause(m, pk):
+        pk = "" if pd.isna(pk) else str(pk).strip().rstrip(".")
+        if pk.lower() in ("", "nan", "нет", "-", "—"):
+            return str(m)
+        return f"{m} (п. {pk})" if re.match(r"^\d", pk) else f"{m} ({pk})"
+    t["_m"] = [_with_clause(m, pk) for pk, m in zip(t["Пункт Приказа"], t["Мероприятие"])]
+    t["_tk"] = t["Тип мероприятий"].astype(str)
+    t = t.sort_values(["_tk", "Пункт Приказа", "Мероприятие"], key=_nat_sort_key("Пункт Приказа"))
+    keys = ["ООЗТ", "Квартал", "Выдел"]
+    lst = t.groupby(keys, as_index=False, sort=False, dropna=False).agg(
+        **{"Экосистема": ("Экосистема", "first"), "Мероприятия": ("_m", "\n".join),
+           "Число": ("Мероприятие", "size")})
+    grid = cfg.unit_mode == "eco" and not cfg.report_group_field
+    same = bool(cfg.unit_mode == "eco" and cfg.report_group_field and data is not None
+                and cfg.report_group_field == getattr(data, "F_ID", None))
+    order = ["Выдел", "Квартал"] if grid else ["Квартал", "Выдел"]
+    lst = lst.sort_values(["ООЗТ"] + order, key=_nat_sort_key("Квартал", "Выдел")).reset_index(drop=True)
+    cols = (["Выдел", "Квартал"] if grid else ["Квартал"] + ([] if same else ["Выдел"])) + \
+           ["Экосистема", "Мероприятия", "Число"]
+    if lst["ООЗТ"].nunique() > 1:
+        cols = ["ООЗТ"] + cols
+    out = lst[cols].rename(columns={"Квартал": L["group"], "Выдел": L["unit"], "Экосистема": L["unit_name"],
+                                    "Мероприятия": "Мероприятия (пункт Приказа)", "Число": "Число мероприятий"})
+    if grid:
+        how = f"по возрастанию «{L['unit']}»"
+    elif same:
+        how = f"по возрастанию «{L['group']}»"
+    else:
+        how = f"по возрастанию «{L['group']}», внутри — по «{L['unit']}»"
+    return out, how
+
+
 def _report_blocks(data: Data, table: pd.DataFrame, evidence, rep: Path, kv_all: pd.DataFrame,
                    basemap=True, draw=True) -> list:
     """Содержание отчёта в нейтральном виде; из него собираются MD, DOCX и PDF.
@@ -2304,13 +2467,30 @@ def _report_blocks(data: Data, table: pd.DataFrame, evidence, rep: Path, kv_all:
             B.append(("note", "Мероприятия по загруженным данным не назначены."))
             continue
         B.append(("h", 2, "Мероприятия по приказу"))
-        grouped = sub.sort_values(group_cols + [L["unit"]]).groupby(group_cols, sort=False, dropna=False)
+        grouped = sub.sort_values(group_cols + [L["unit"]], key=_nat_sort_key(L["unit"], "Соответствие Пункту Приказа")
+                                  ).groupby(group_cols, sort=False, dropna=False)
         for (measure_type, ecosystem_type, order_clause), group in grouped:
             B += [("h", 3, f"Тип мероприятий: {s(measure_type)}"),
                   ("h", 4, f"Тип экосистемы: {s(ecosystem_type)}"),
                   ("h", 5, f"Соответствие Пункту Приказа: {s(order_clause)}"),
-                  ("table", cols, [[s(r[c]) for c in cols] for _, r in group.sort_values([L["unit"]]).iterrows()],
+                  ("table", cols, [[s(r[c]) for c in cols] for _, r in group.sort_values([L["unit"]], key=_nat_sort_key(L["unit"])).iterrows()],
                    widths, 9)]
+    # перечень мероприятий к выполнению (по выбранным в отчёт кварталам / листам / индексам)
+    if not table.empty and len(kv_all):
+        sel = table.merge(kv_all[["OOZT", "KV"]].rename(columns={"OOZT": "ООЗТ", "KV": "Квартал"}),
+                          on=["ООЗТ", "Квартал"], how="inner") if len(kv_all) else table
+        ex, how = execution_list(sel, cfg, data)
+        if not ex.empty:
+            hdr = list(ex.columns)
+            ex = ex.rename(columns={"Число мероприятий": "Число"})
+            fixed = {L["group"]: 2.4, L["unit"]: 2.2, L["unit_name"]: 5.6, "Число": 1.5, "ООЗТ": 2.6}
+            wd = [fixed.get(c, 0) for c in hdr]
+            rest = TEXT_W_CM - sum(wd)
+            wd = [w if w else rest for w in wd]
+            B += [("break",), ("h", 1, "Перечень мероприятий к выполнению"),
+                  ("p", f"Одна строка — один полигон; порядок — {how}. Полигонов: {len(ex)}; "
+                        f"мероприятий: {int(ex['Число'].sum())}."),
+                  ("table", hdr, [[s(v) for v in r] for r in ex.itertuples(index=False)], wd, 9)]
     return B
 
 
@@ -2354,7 +2534,7 @@ _BAD_XML = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
 
 def _x(t) -> str:
     from xml.sax.saxutils import escape
-    return escape(_BAD_XML.sub("", str(t)))
+    return escape(_BAD_XML.sub("", str(t)), {'"': "&quot;"})
 
 
 def _png_size(path: Path) -> tuple[int, int]:
@@ -2854,6 +3034,218 @@ def build_report(data: Data, table: pd.DataFrame, evidence, out_dir: Path, kv_li
 
 
 # =====================================================================================
+#                                 ПРОЕКТ QGIS
+# =====================================================================================
+QGIS_PROJECT_NAME = "oozt_measures.qgs"
+_MEASURE_COLORS = ["#E6194B", "#3CB44B", "#4363D8", "#F58231", "#911EB4", "#42D4F4", "#F032E6", "#BFEF45",
+                   "#469990", "#9A6324", "#800000", "#808000", "#000075", "#DCBEFF", "#FFE119", "#AAFFC3",
+                   "#FABED4", "#A9A9A9"]
+
+
+def _rgba(hex_color: str, alpha: float = 1.0) -> str:
+    h = hex_color.lstrip("#")
+    return f"{int(h[0:2], 16)},{int(h[2:4], 16)},{int(h[4:6], 16)},{int(round(alpha * 255))}"
+
+
+def _q_opts(d: dict) -> str:
+    """Свойства слоя символа: формат <Option> (QGIS ≥ 3.26) и <prop> (более ранние версии)."""
+    opt = "".join(f'<Option name="{_x(k)}" type="QString" value="{_x(v)}"/>' for k, v in d.items())
+    prop = "".join(f'<prop k="{_x(k)}" v="{_x(v)}"/>' for k, v in d.items())
+    return f'<Option type="Map">{opt}</Option>{prop}'
+
+
+def _q_symbol(kind: str, name: str, color: str, alpha=1.0, outline="#333333", width=None, size=None,
+              outline_width=0.26) -> str:
+    if kind == "fill":
+        lay = ("SimpleFill", {"color": _rgba(color, alpha), "outline_color": _rgba(outline, 1.0),
+                              "outline_style": "solid", "outline_width": str(outline_width),
+                              "outline_width_unit": "MM", "style": "solid" if alpha > 0 else "no",
+                              "joinstyle": "bevel"})
+    elif kind == "line":
+        lay = ("SimpleLine", {"line_color": _rgba(color, alpha), "line_width": str(width or 0.6),
+                              "line_width_unit": "MM", "line_style": "solid", "capstyle": "round",
+                              "joinstyle": "round"})
+    else:
+        lay = ("SimpleMarker", {"name": "circle", "color": _rgba(color, alpha), "outline_color": "255,255,255,255",
+                                "outline_style": "solid", "outline_width": "0.3", "outline_width_unit": "MM",
+                                "size": str(size or 2.6), "size_unit": "MM"})
+    return (f'<symbol type="{kind}" name="{_x(name)}" alpha="1" clip_to_extent="1" force_rhr="0">'
+            f'<layer class="{lay[0]}" enabled="1" locked="0" pass="0">{_q_opts(lay[1])}</layer></symbol>')
+
+
+def _q_single(sym: str) -> str:
+    return (f'<renderer-v2 type="singleSymbol" forceraster="0" symbollevels="0" enableorderby="0">'
+            f'<symbols>{sym}</symbols></renderer-v2>')
+
+
+def _q_categorized(attr: str, cats: list) -> str:
+    """cats: [(значение, подпись, символ_xml_с_именем_i)]"""
+    c = "".join(f'<category render="true" symbol="{i}" value="{_x(v)}" label="{_x(lbl)}"/>'
+                for i, (v, lbl, _) in enumerate(cats))
+    s_ = "".join(sym for _, _, sym in cats)
+    return (f'<renderer-v2 type="categorizedSymbol" attr="{_x(attr)}" forceraster="0" symbollevels="0" '
+            f'enableorderby="0"><categories>{c}</categories><symbols>{s_}</symbols></renderer-v2>')
+
+
+def _q_labels(field_name: str, max_scale=20000, size=8) -> str:
+    return (f'<labeling type="simple"><settings calloutType="simple">'
+            f'<text-style fieldName="{_x(field_name)}" isExpression="0" fontFamily="Arial" fontSize="{size}" '
+            f'fontSizeUnit="Point" fontWeight="75" fontItalic="0" textColor="20,20,20,255" textOpacity="1" '
+            f'multilineHeight="1" blendMode="0" previewBkgrdColor="255,255,255,255">'
+            f'<text-buffer bufferDraw="1" bufferSize="0.8" bufferSizeUnits="MM" bufferColor="255,255,255,255" '
+            f'bufferOpacity="1" bufferJoinStyle="128" bufferNoFill="1" bufferBlendMode="0"/>'
+            f'</text-style><text-format wrapChar="" multilineAlign="1" plussign="0" decimals="3" formatNumbers="0"/>'
+            f'<placement placement="1" centroidInside="1" centroidWhole="0" fitInPolygonOnly="0" priority="5" '
+            f'offsetType="0" dist="0" overrunDistance="0"/>'
+            f'<rendering scaleVisibility="1" scaleMin="1" scaleMax="{max_scale}" obstacle="1" '
+            f'displayAll="0" upsidedownLabels="0" labelPerPart="0" mergeLines="0" minFeatureSize="0" '
+            f'limitNumLabels="0" maxNumLabels="2000" drawLabels="1" fontLimitPixelSize="0"/>'
+            f'</settings></labeling>')
+
+
+def _q_srs(epsg: int) -> str:
+    from pyproj import CRS
+    c = CRS.from_epsg(epsg)
+    return (f'<spatialrefsys nativeFormat="Wkt"><wkt>{_x(c.to_wkt())}</wkt><proj4>{_x(c.to_proj4())}</proj4>'
+            f'<srid>{epsg}</srid><authid>EPSG:{epsg}</authid><description>{_x(c.name)}</description>'
+            f'<projectionacronym></projectionacronym><ellipsoidacronym></ellipsoidacronym>'
+            f'<geographicflag>{"true" if c.is_geographic else "false"}</geographicflag></spatialrefsys>')
+
+
+def write_qgis_project(out: Path, cfg: Config, data: "Data", gpkg: Path, terr_layer: str, label_field: str,
+                       measures_layer: str | None, measure_types: list, evidence_layers: list, nmax: int = 0) -> Path:
+    """Файл проекта QGIS (.qgs, относительные пути) с результатами из evidence.gpkg.
+    measure_types: [(тип мероприятий, [мероприятие, …])]; evidence_layers: [(имя слоя gpkg, геометрия, [значения layer])]"""
+    import uuid
+    L = unit_labels(cfg)
+    rel = "./" + gpkg.name
+    layers_xml, tree = [], []
+    wgs = _q_srs(4326)
+    b = data.oozt.to_crs(3857).total_bounds
+    pad = max(b[2] - b[0], b[3] - b[1]) * 0.05
+
+    def add_vec(name, layer, geom, renderer, subset=None, labels=None, visible=True):
+        lid = f"{re.sub(r'[^0-9A-Za-z]+', '_', layer)}_{uuid.uuid4().hex[:10]}"
+        src = f"{rel}|layername={layer}" + (f"|subset={subset}" if subset else "")
+        gtype = {"poly": "Polygon", "line": "Line", "point": "Point"}[geom]
+        lab_attr = ' labelsEnabled="1"' if labels else ""
+        layers_xml.append(
+            f'<maplayer type="vector" geometry="{gtype}" autoRefreshEnabled="0" refreshOnNotifyEnabled="0" '
+            f'hasScaleBasedVisibilityFlag="0" readOnly="0" simplifyDrawingHints="1"{lab_attr}>'
+            f'<id>{lid}</id><datasource>{_x(src)}</datasource><layername>{_x(name)}</layername>'
+            f'<srs>{wgs}</srs><provider encoding="UTF-8">ogr</provider>{renderer}{labels or ""}'
+            f'<blendMode>0</blendMode><featureBlendMode>0</featureBlendMode><layerOpacity>1</layerOpacity>'
+            f'</maplayer>')
+        return (f'<layer-tree-layer id="{lid}" name="{_x(name)}" checked="{"Qt::Checked" if visible else "Qt::Unchecked"}" '
+                f'expanded="0" providerKey="ogr" source="{_x(src)}"><customproperties/></layer-tree-layer>')
+
+    def group(name, children, checked=True, expanded=True):
+        return (f'<layer-tree-group name="{_x(name)}" checked="{"Qt::Checked" if checked else "Qt::Unchecked"}" '
+                f'expanded="{1 if expanded else 0}"><customproperties/>{"".join(children)}</layer-tree-group>')
+
+    # 1) основания — цвета как на схемах
+    ev_nodes = []
+    for lyr, geom, values in sorted(evidence_layers, key=lambda t: {"point": 0, "line": 1, "poly": 2}[t[1]]):
+        cats = []
+        for i, v in enumerate(sorted(values)):
+            color, kind = _slope_style(v)
+            if geom == "point":
+                sym = _q_symbol("marker", str(i), color, size=3.0 if "виды" in v else 2.2)
+            elif geom == "line":
+                sym = _q_symbol("line", str(i), color, width=0.9)
+            else:
+                alpha = 0.0 if "SDM" in v else (0.85 if kind == "slope" else 0.45)
+                sym = _q_symbol("fill", str(i), color, alpha=alpha, outline=color, outline_width=0.3)
+            cats.append((v, v, sym))
+        title = {"point": "Основания — точки", "line": "Основания — линии", "poly": "Основания — участки"}[geom]
+        ev_nodes.append(add_vec(title, lyr, geom, _q_categorized("layer", cats)))
+    # 2) мероприятия: по типам, слой на каждое мероприятие (фильтр по слою measures)
+    m_nodes = []
+    if measures_layer:
+        ci = 0
+        for mtype, names in measure_types:
+            kids = []
+            for nm in names:
+                col = _MEASURE_COLORS[ci % len(_MEASURE_COLORS)]
+                ci += 1
+                subset = '"Мероприятие" = ' + "'" + str(nm).replace("'", "''") + "'"
+                kids.append(add_vec(nm, measures_layer, "poly",
+                                    _q_single(_q_symbol("fill", "0", col, alpha=0.55, outline=col, outline_width=0.4)),
+                                    subset=subset, visible=False))
+            m_nodes.append(group(mtype or "Без типа", kids, checked=True, expanded=False))
+    # 3) территория: число мероприятий на полигон
+    reds = ["#FFFFFF", "#FEE8C8", "#FDBB84", "#FC8D59", "#E34A33", "#B30000", "#7F0000"]
+    cats = [(str(k), (f"{k} мероприят." if k < 6 or nmax <= 6 else f"{k}"), _q_symbol(
+        "fill", str(k), reds[min(k, len(reds) - 1)], alpha=0.0 if k == 0 else 0.75, outline="#555555",
+        outline_width=0.2)) for k in range(0, nmax + 1)]
+    terr = add_vec(f"{L['units_gen'].capitalize()}: число мероприятий", terr_layer, "poly",
+                   _q_categorized("n_measures", cats), labels=_q_labels(label_field))
+    # 4) исходные векторные слои (выключены)
+    src_nodes = []
+    for title, key, geom, color in (("Тропы", "trails", "line", "#707070"),
+                                    ("Гидрография — линии", "hydro_lines", "line", "#1F78B4"),
+                                    ("Гидрография — полигоны", "hydro_polys", "poly", "#A6CEE3")):
+        for pth in getattr(cfg, key) or []:
+            pth = Path(pth)
+            try:
+                rp = os.path.relpath(pth.resolve(), out.resolve())
+                ds = "./" + Path(rp).as_posix() if not os.path.isabs(rp) else pth.as_posix()
+            except ValueError:                  # другой диск — абсолютный путь
+                ds = pth.as_posix()
+            lid = f"src_{key}_{uuid.uuid4().hex[:10]}"
+            sym = _q_symbol("line", "0", color, width=0.3) if geom == "line" else \
+                _q_symbol("fill", "0", color, alpha=0.6, outline="#1F78B4", outline_width=0.2)
+            layers_xml.append(
+                f'<maplayer type="vector" geometry="{"Line" if geom == "line" else "Polygon"}">'
+                f'<id>{lid}</id><datasource>{_x(ds)}</datasource><layername>{_x(title + " — " + pth.stem)}</layername>'
+                f'<provider encoding="UTF-8">ogr</provider>{_q_single(sym)}</maplayer>')
+            src_nodes.append(f'<layer-tree-layer id="{lid}" name="{_x(title + " — " + pth.stem)}" '
+                             f'checked="Qt::Unchecked" expanded="0" providerKey="ogr" source="{_x(ds)}">'
+                             f'<customproperties/></layer-tree-layer>')
+    # 5) подложка OSM
+    osm_id = f"osm_{uuid.uuid4().hex[:10]}"
+    osm_src = "type=xyz&url=https://tile.openstreetmap.org/%7Bz%7D/%7Bx%7D/%7By%7D.png&zmax=19&zmin=0"
+    layers_xml.append(
+        f'<maplayer type="raster" autoRefreshEnabled="0"><id>{osm_id}</id><datasource>{_x(osm_src)}</datasource>'
+        f'<layername>OpenStreetMap</layername><srs>{_q_srs(3857)}</srs><provider>wms</provider>'
+        f'<pipe><rasterrenderer type="singlebandcolordata" opacity="0.8" alphaBand="-1" band="1">'
+        f'<rasterTransparency/></rasterrenderer><brightnesscontrast brightness="0" contrast="0"/>'
+        f'<huesaturation saturation="-70" grayscaleMode="0" colorizeOn="0" colorizeRed="255" colorizeGreen="128" '
+        f'colorizeBlue="128" colorizeStrength="100"/><rasterresampler maxOversampling="2"/></pipe>'
+        f'<blendMode>0</blendMode></maplayer>')
+    osm_node = (f'<layer-tree-layer id="{osm_id}" name="OpenStreetMap" checked="Qt::Checked" expanded="0" '
+                f'providerKey="wms" source="{_x(osm_src)}"><customproperties/></layer-tree-layer>')
+
+    tree = []
+    if ev_nodes:
+        tree.append(group("Основания назначения", ev_nodes))
+    if m_nodes:
+        tree.append(group("Мероприятия (включайте нужные)", m_nodes, expanded=True))
+    tree.append(terr)
+    if src_nodes:
+        tree.append(group("Исходные слои", src_nodes, checked=False, expanded=False))
+    tree.append(osm_node)
+    title = f"Природоохранные мероприятия: {', '.join(map(str, data.oozt['OOZT'].unique()[:3]))}"
+    xml = ("<!DOCTYPE qgis PUBLIC 'http://mrcc.com/qgis.dtd' 'SYSTEM'>\n"
+           f'<qgis projectname="{_x(title)}" version="3.28.0-Firenze">'
+           f'<homePath path=""/><title>{_x(title)}</title>'
+           f'<projectCrs>{_q_srs(3857)}</projectCrs>'
+           f'<layer-tree-group><customproperties/>{"".join(tree)}</layer-tree-group>'
+           f'<mapcanvas annotationsVisible="1" name="theMapCanvas"><units>meters</units>'
+           f'<extent><xmin>{b[0] - pad}</xmin><ymin>{b[1] - pad}</ymin><xmax>{b[2] + pad}</xmax>'
+           f'<ymax>{b[3] + pad}</ymax></extent><rotation>0</rotation>'
+           f'<destinationsrs>{_q_srs(3857)}</destinationsrs><rendermaptile>0</rendermaptile></mapcanvas>'
+           f'<projectlayers>{"".join(layers_xml)}</projectlayers>'
+           f'<properties><Paths><Absolute type="bool">false</Absolute></Paths>'
+           f'<Measurement><DistanceUnits type="QString">meters</DistanceUnits>'
+           f'<AreaUnits type="QString">ha</AreaUnits></Measurement></properties>'
+           f'</qgis>')
+    path = out / QGIS_PROJECT_NAME
+    path.write_text(xml, encoding="utf-8")
+    return path
+
+
+# =====================================================================================
 #                                       MAIN
 # =====================================================================================
 def _setup_logging(out: Path, name="run.log"):
@@ -2946,6 +3338,21 @@ def run(cfg: Config):
                     "Число": ("Мероприятие", "size"),
                 })
                 wide.rename(columns=disp).to_excel(xw, index=False, sheet_name="by_vydel")
+                ex, how = execution_list(table, cfg, data)
+                ex.to_excel(xw, index=False, sheet_name="перечень")
+                ws = xw.book["перечень"]
+                ws.freeze_panes = "A2"
+                ws.auto_filter.ref = ws.dimensions
+                for i, c in enumerate(ex.columns, 1):
+                    ws.column_dimensions[chr(64 + i)].width = 70 if c.startswith("Мероприятия") else (
+                        30 if i == len(ex.columns) - 2 else 14)
+                from openpyxl.styles import Alignment as _Al, Font as _Ft, PatternFill as _Pf
+                for cell in ws[1]:
+                    cell.font = _Ft(bold=True); cell.fill = _Pf("solid", fgColor="D9EAD3")
+                    cell.alignment = _Al(wrap_text=True, vertical="center", horizontal="center")
+                for row in ws.iter_rows(min_row=2):
+                    for cell in row:
+                        cell.alignment = _Al(wrap_text=True, vertical="top")
                 from openpyxl.styles import Alignment, Font, PatternFill
                 for ws in (xw.book["мероприятия по приказу"], xw.book["by_vydel"]):
                     # Двухуровневый заголовок: четыре колонки объединены
@@ -2983,18 +3390,46 @@ def run(cfg: Config):
             agg = table.groupby(["ООЗТ", "Квартал", "Выдел"])["Мероприятие"].agg(lambda s: "; ".join(dict.fromkeys(s)))
             vm = vm.merge(agg.rename("measures").reset_index().rename(
                 columns={"ООЗТ": "OOZT", "Квартал": "KV", "Выдел": "VYD"}), on=["OOZT", "KV", "VYD"], how="left")
-        vm = vm.drop(columns=["__src", "KV_SORT"], errors="ignore")
+        vm["n_measures"] = (vm["measures"].fillna("").map(lambda x: len([y for y in x.split("; ") if y]))
+                            if "measures" in vm.columns else 0)
+        vm = vm.drop(columns=["__src", "KV_SORT", "VYD_SORT"], errors="ignore")
         if cfg.unit_mode == "eco":
             # исходное поле ID уже есть в слое; служебный VYD не дублируем, KV — лист / группа отчёта
             vm = vm.drop(columns=["VYD"] if data.F_ID in vm.columns and data.F_ID != "VYD" else [])
             vm = vm.rename(columns={"KV": "report_sheet" if not cfg.report_group_field else "report_group"})
-        vm.to_crs(4326).to_file(gpkg, layer="vydel_measures" if cfg.unit_mode != "eco" else "eco_measures",
-                                driver="GPKG")
+        terr_layer = "vydel_measures" if cfg.unit_mode != "eco" else "eco_measures"
+        vm.to_crs(4326).to_file(gpkg, layer=terr_layer, driver="GPKG")
+        # мероприятия: одна запись на пару «полигон — мероприятие», с основанием (для фильтров и стилей)
+        measures_layer = None
+        if not table.empty:
+            geo = data.oozt[["OOZT", "KV", "VYD", "geometry"]].rename(
+                columns={"OOZT": "ООЗТ", "KV": "Квартал", "VYD": "Выдел"})
+            ml = geo.merge(table, on=["ООЗТ", "Квартал", "Выдел"], how="inner")
+            ml = gpd.GeoDataFrame(ml.rename(columns=disp), geometry="geometry", crs=data.oozt.crs)
+            ml.to_crs(4326).to_file(gpkg, layer="measures", driver="GPKG")
+            measures_layer = "measures"
+        ev_layers = []
         if ev is not None and not ev.empty:
             for gt, grp in ev.groupby(ev.geom_type.str.replace("Multi", "")):
                 grp.to_crs(4326).to_file(
                     gpkg, layer=f"evidence_{gt.lower()}", driver="GPKG")
-        log.info("Слои-основания записаны: %s", gpkg)
+                ev_layers.append((f"evidence_{gt.lower()}",
+                                  {"Point": "point", "LineString": "line"}.get(gt, "poly"),
+                                  sorted(grp["layer"].astype(str).unique())))
+        log.info("Результаты записаны в GeoPackage: %s (слои %s%s%s)", gpkg, terr_layer,
+                 ", measures" if measures_layer else "", "".join(", " + x[0] for x in ev_layers))
+        try:
+            mt = []
+            if not table.empty:
+                for t_, g_ in table.groupby("Тип мероприятий", sort=True):
+                    mt.append((t_, list(dict.fromkeys(g_.sort_values("Пункт Приказа", key=_nat_sort_key(
+                        "Пункт Приказа"))["Мероприятие"]))))
+            qp = write_qgis_project(out, cfg, data, gpkg, terr_layer,
+                                    data.F_ID if cfg.unit_mode == "eco" else "VYD", measures_layer, mt, ev_layers,
+                                    nmax=int(vm["n_measures"].max()) if len(vm) else 0)
+            log.info("Проект QGIS: %s", qp)
+        except Exception as e:
+            log.warning("Проект QGIS не создан: %s", e)
     except Exception as e:
         log.warning("GPKG не записан: %s", e)
 
