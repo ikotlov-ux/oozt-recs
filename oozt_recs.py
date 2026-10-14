@@ -185,7 +185,7 @@ class Config:
     out_dir: str = ""
     report_kv: list = field(default_factory=list)   # кварталы / листы / группы для отчёта; пусто = все
     basemap: bool = True
-    shore_min_share_pct: float = 25.0    # укрепление берегов: мин. доля полигона под тропами у воды, %
+    min_share_pct: float = 25.0          # мин. доля полигона под участком-основанием (тропы, уклон, вороны, SDM), %
     split_multipart: bool = True         # многочастный объект → отдельные контуры (ID-1, ID-2, …)
     report_formats: list = field(default_factory=lambda: ["docx", "pdf"])  # docx, pdf, doc; report.md — всегда
     fields: dict = field(default_factory=dict)      # kv_vyd: OOZT, KV, VYD, TYPE, NAME; eco: ID, TYPE, NAME, OOZT
@@ -197,6 +197,8 @@ class Config:
     def load(path: str | Path) -> "Config":
         d = json.loads(Path(path).read_text(encoding="utf-8"))
         known = set(Config.__dataclass_fields__)
+        if "shore_min_share_pct" in d and "min_share_pct" not in d:   # прежнее имя параметра
+            d["min_share_pct"] = d["shore_min_share_pct"]
         return Config(**{k: v for k, v in d.items() if k in known})
 
 
@@ -329,7 +331,7 @@ def classify_measure(measure: dict) -> dict:
     return dict(rule=None, params={}, reason="метод не распознан")
 
 
-_SHORE_SHARE = [25.0]     # текущий порог для описания правила (обновляется из конфигурации)
+_MIN_SHARE = [25.0]     # текущий порог доли полигона (обновляется из конфигурации)
 
 
 def describe_rule(measure: dict) -> str:
@@ -338,7 +340,8 @@ def describe_rule(measure: dict) -> str:
     r, pr = c["rule"], c["params"]
     if r is None:
         return "не рассчитывается: " + c["reason"]
-    return {
+    sh = f"; участок ≥ {_MIN_SHARE[0]:g}% площади полигона" if _MIN_SHARE[0] > 0 else ""
+    d = {
         "corvus": f"плотность птиц рода Corvus в окне {CORVUS_WINDOW_M:.0f} м ≥ верхнего квартиля; лесные полигоны",
         "slope": (f"уклон по ЦМР более {pr.get('threshold_pct', 7):g}% "
                   + ("в луговых полигонах" if pr.get("type_keys") else "в полигонах любого типа")),
@@ -347,13 +350,17 @@ def describe_rule(measure: dict) -> str:
         "rare": (f"тропы в {RARE_BUFFER_M:.0f} м от точек редких видов, в их полигонах и в зонах SDM "
                  f"≥ {SDM_THRESHOLD_RARE:.2f}"),
         "shore": (f"тропы повышенной плотности (окно {TRAIL_WINDOW_M:.0f} м, верхний квартиль) в "
-                  f"{SHORE_BUFFER_M:.0f} м от водных объектов (линии и полигоны гидрографии); полигоны любого типа, "
-                  f"если такой участок занимает ≥ {_SHORE_SHARE[0]:g}% площади полигона"),
+                  f"{SHORE_BUFFER_M:.0f} м от водных объектов (линии и полигоны гидрографии); полигоны любого типа"),
         "trail_hotspot": (f"участки повышенной плотности троп (окно {TRAIL_WINDOW_M:.0f} м, верхний квартиль); "
                           "лесные полигоны"),
         "trail_density": "плотность троп на полигон (м/га) ≥ верхнего квартиля; лесные полигоны",
         "type": f"все полигоны типа «{pr.get('label', '')}»",
     }[r]
+    if r in ("corvus", "slope", "shore", "trail_hotspot"):
+        d += sh
+    elif r in ("invasive", "rare") and sh:
+        d += f"; зоны SDM — если занимают ≥ {_MIN_SHARE[0]:g}% площади полигона"
+    return d
 
 
 def _cfg_has(cfg: Config, key: str) -> bool:
@@ -635,9 +642,9 @@ class SetupWindow:
         ttk.Checkbutton(s5, text="Подложка OpenStreetMap на схемах (нужен интернет)",
                         variable=self.v_basemap).pack(anchor="w", pady=(6, 0))
         r = ttk.Frame(s5); r.pack(fill="x", pady=(4, 0))
-        ttk.Label(r, text="Укрепление берегов: участок троп у воды не меньше").pack(side="left")
-        self.v_shore = tk.StringVar(value="25")
-        ttk.Entry(r, textvariable=self.v_shore, width=5).pack(side="left", padx=4)
+        ttk.Label(r, text="Порог: участок-основание (тропы, уклон, вороны, SDM) не меньше").pack(side="left")
+        self.v_minshare = tk.StringVar(value="25")
+        ttk.Entry(r, textvariable=self.v_minshare, width=5).pack(side="left", padx=4)
         ttk.Label(r, text="% площади полигона (0 — без порога)").pack(side="left")
         self.v_split = tk.BooleanVar(value=True)
         ttk.Checkbutton(s5, text="Делить многочастные объекты на отдельные контуры (ID-1, ID-2, …) — "
@@ -834,9 +841,9 @@ class SetupWindow:
         c.basemap = bool(self.v_basemap.get())
         c.split_multipart = bool(self.v_split.get())
         try:
-            c.shore_min_share_pct = max(0.0, float(self.v_shore.get().replace(",", ".") or 0))
+            c.min_share_pct = max(0.0, float(self.v_minshare.get().replace(",", ".") or 0))
         except ValueError:
-            c.shore_min_share_pct = 25.0
+            c.min_share_pct = 25.0
         c.report_formats = [k for k, v in self.v_formats.items() if v.get()]
         return c
 
@@ -947,7 +954,7 @@ class SetupWindow:
         self.v_kv.set(", ".join(map(str, cfg.report_kv or [])))
         self.v_basemap.set(bool(cfg.basemap))
         self.v_split.set(bool(getattr(cfg, "split_multipart", True)))
-        self.v_shore.set(f"{float(getattr(cfg, 'shore_min_share_pct', 25.0)):g}")
+        self.v_minshare.set(f"{float(getattr(cfg, 'min_share_pct', 25.0)):g}")
         for k, v in self.v_formats.items():
             v.set(k in (cfg.report_formats or []))
         self.field_vars = {}
@@ -1700,7 +1707,20 @@ def _overlay_patches_to_vydels(data: Data, patches: gpd.GeoDataFrame, target: gp
     ha = inter.area / 1e4
     df = pd.DataFrame({"uid": target["uid"].values, "patch_ha": ha.values,
                        "share": (ha / target["area_ha"]).values})
-    return df[df["patch_ha"] >= min_ha]
+    df = df[df["patch_ha"] >= min_ha]
+    thr = _min_share(data)
+    if thr > 0 and len(df):
+        n0 = len(df)
+        df = df[df["share"] * 100 >= thr]
+        log.info("  порог: участок ≥ %g%% площади полигона — оставлено %d из %d", thr, len(df), n0)
+    return df
+
+
+def _min_share(data) -> float:
+    try:
+        return float(getattr(data.cfg, "min_share_pct", 0) or 0)
+    except (TypeError, ValueError):
+        return 0.0
 
 
 def rule_type(data: Data, res: Results, measure: dict, keys, label):
@@ -1775,7 +1795,7 @@ def rule_trail_hotspot(data: Data, res: Results, measure: dict, type_keys=TYPE_F
     for _, h in hit.iterrows():
         r = data.oozt[data.oozt["uid"] == h["uid"]].iloc[0]
         res.add(r, measure, f"участки повышенной плотности троп (окно {TRAIL_WINDOW_M:.0f} м, ≥Q75={thr:.0f} м/га): "
-                            f"{h['patch_ha']:.2f} га", round(h["patch_ha"], 2))
+                            f"{h['patch_ha']:.2f} га ({100 * h['share']:.0f}% полигона)", round(h["patch_ha"], 2))
     if not hit.empty:
         sel = target[target["uid"].isin(hit["uid"])]
         pieces = polys[polys.intersects(unary_union(sel.geometry.values))]
@@ -1797,11 +1817,6 @@ def rule_shore_trails(data: Data, res: Results, measure: dict):
     hot_shore["geometry"] = hot_shore.geometry.intersection(shore)
     hot_shore = hot_shore[~hot_shore.is_empty]
     hit = _overlay_patches_to_vydels(data, hot_shore, data.oozt, min_ha=MIN_PATCH_HA / 5)
-    thr = float(getattr(data.cfg, "shore_min_share_pct", 0) or 0)
-    n_all = len(hit)
-    if thr > 0:
-        hit = hit[hit["share"] * 100 >= thr]
-        log.info("  порог: участок у воды ≥ %g%% площади полигона — оставлено %d из %d", thr, len(hit), n_all)
     for _, h in hit.iterrows():
         r = data.oozt[data.oozt["uid"] == h["uid"]].iloc[0]
         res.add(r, measure, f"тропы повышенной плотности в {SHORE_BUFFER_M:.0f} м от водных объектов: "
@@ -1883,6 +1898,8 @@ def rule_invasive(data: Data, res: Results, measure: dict):
             if tot.empty:
                 continue
             r = data.oozt[data.oozt["uid"] == uid].iloc[0]
+            if 100 * tot.sum() / max(r["area_ha"], 1e-9) < _min_share(data):
+                continue
             txt = ", ".join(f"{s} ({a:.2f} га)" for s, a in tot.items())
             res.add(r, m2, f"вероятность SDM ≥ {SDM_THRESHOLD_INVASIVE}: {txt}", round(float(tot.sum()), 2))
         res.add_evidence(j, m2["name"],
@@ -1948,6 +1965,8 @@ def rule_rare_trails(data: Data, res: Results, measure: dict):
             if tot.empty:
                 continue
             r = data.oozt[data.oozt["uid"] == uid].iloc[0]
+            if 100 * tot.sum() / max(r["area_ha"], 1e-9) < _min_share(data):
+                continue
             res.add(r, m2, "вероятность SDM ≥ %.2f: " % SDM_THRESHOLD_RARE +
                     ", ".join(f"{s} ({a:.2f} га)" for s, a in tot.items()), round(float(tot.sum()), 2))
         res.add_evidence(j, m2["name"], "редкие виды — SDM", "species")
@@ -2000,7 +2019,7 @@ def rule_corvus(data: Data, res: Results, measure: dict, genus="Corvus", type_ke
     for _, h in hit.iterrows():
         r = data.oozt[data.oozt["uid"] == h["uid"]].iloc[0]
         res.add(r, measure, f"плотность {genus} (окно {CORVUS_WINDOW_M:.0f} м) ≥ Q75 = {thr:.3f} шт/га: "
-                            f"{h['patch_ha']:.2f} га", round(h["patch_ha"], 2))
+                            f"{h['patch_ha']:.2f} га ({100 * h['share']:.0f}% полигона)", round(h["patch_ha"], 2))
     res.add_evidence(polys[polys.intersects(data.union)], measure["name"], f"плотность {genus} (Q75)")
     res.add_evidence(c[c.intersects(data.union.buffer(CORVUS_WINDOW_M))], measure["name"], f"{genus} — точки", "species")
     log.info("  → %d %s (%d точек %s)", len(hit), _units(), len(c), genus)
@@ -2482,9 +2501,9 @@ def _fig_name(oozt, kv) -> str:
 def _params_line() -> str:
     return ("Параметры: окно плотности троп %.0f м, окно плотности врановых %.0f м, буфер от точек редких видов "
             "%.0f м, порог SDM %.2f (инвазионные) / %.2f (редкие), верхний квартиль — по всем ООЗТ; "
-            "укрепление берегов — участок троп у воды не меньше %g%% площади полигона."
+            "мероприятия по участкам (тропы, уклон, врановые, SDM) — участок не меньше %g%% площади полигона."
             % (TRAIL_WINDOW_M, CORVUS_WINDOW_M, RARE_BUFFER_M, SDM_THRESHOLD_INVASIVE, SDM_THRESHOLD_RARE,
-               _SHORE_SHARE[0]))
+               _MIN_SHARE[0]))
 
 
 def _summary_table(table: pd.DataFrame, L: dict) -> pd.DataFrame:
@@ -2500,7 +2519,7 @@ TEXT_W_CM = PAGE_W_CM - 2 * MARGIN_CM
 def rules_table(measures, table: pd.DataFrame, cfg: Config) -> pd.DataFrame:
     """Как рассчитано каждое включённое мероприятие: метод из таблицы → правило скрипта → число полигонов.
     Позволяет сверить, что название мероприятия и основание назначения соответствуют друг другу."""
-    _SHORE_SHARE[0] = float(getattr(cfg, "shore_min_share_pct", 0) or 0)
+    _MIN_SHARE[0] = float(getattr(cfg, "min_share_pct", 0) or 0)
     rows = []
     cnt = table["Мероприятие"].value_counts() if not table.empty else pd.Series(dtype=int)
     for m in measures or []:
@@ -3454,7 +3473,7 @@ def run(cfg: Config):
     out = Path(cfg.out_dir)
     out.mkdir(parents=True, exist_ok=True)
     _setup_logging(out)
-    _SHORE_SHARE[0] = float(getattr(cfg, "shore_min_share_pct", 0) or 0)
+    _MIN_SHARE[0] = float(getattr(cfg, "min_share_pct", 0) or 0)
     measures = read_measures(cfg.measures_xlsx)
     data = Data(cfg)
     data.measures = measures
