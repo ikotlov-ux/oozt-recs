@@ -269,6 +269,17 @@ RULE_REQS = {
 }
 
 
+def type_matches(type_value, keys) -> bool:
+    """Тип полигона относится к одному из ключей. «водн» не совпадает с «околоводные»:
+    иначе мероприятия только для водных экосистем (аэрация) попадают и на околоводные."""
+    t = str(type_value).lower()
+    t_water = t.replace("околовод", "")          # «водн» ищем вне слова «околоводные»
+    for k in keys:
+        if k in (t_water if k in TYPE_WATER else t):
+            return True
+    return False
+
+
 def classify_measure(measure: dict) -> dict:
     """Метод выявления → правило. Возвращает {'rule', 'params', 'reason'} (rule=None — не рассчитывается).
     Правило определяется по тексту метода выявления; название мероприятия используется только там,
@@ -368,7 +379,7 @@ def measure_status(measure: dict, cfg: Config, type_counts: dict | None = None) 
     keys = c["params"].get("keys") or c["params"].get("type_keys") or (
         TYPE_FOREST if rule in ("trail_density", "trail_hotspot", "corvus") else None)
     if keys and type_counts is not None:
-        n = sum(v for t, v in type_counts.items() if any(k in str(t).lower() for k in keys))
+        n = sum(v for t, v in type_counts.items() if type_matches(t, keys))
         if n == 0:
             return dict(state="missing", text="в слое нет полигонов типа «%s»" % "/".join(keys),
                         need=need_txt, rule=rule)
@@ -1593,10 +1604,7 @@ class Data:
         return m.astype(bool)
 
     def vydels_of_type(self, *keys) -> gpd.GeoDataFrame:
-        t = self.oozt["Type"].str.lower()
-        m = np.zeros(len(t), dtype=bool)
-        for k in keys:
-            m |= t.str.contains(k, regex=False).values
+        m = self.oozt["Type"].map(lambda t: type_matches(t, keys)).values.astype(bool)
         return self.oozt[m]
 
 
