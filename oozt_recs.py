@@ -30,7 +30,7 @@ oozt_recs.py — подготовка природоохранных реком�
     run.log                     — журнал, в начале — статус каждого мероприятия при выбранных данных
 
 Правила (ключ Метод выявления в Excel → расчёт) — classify_measure() и раздел ПРАВИЛА;
-связь правил со слоями — RULE_REQS. Обязательны только таблица мероприятий и слой территории.
+связь правил со слоями — RULES (data / opt). Обязательны только таблица мероприятий и слой территории.
 """
 from __future__ import annotations
 
@@ -175,13 +175,8 @@ class Config:
     trails: list[str] = field(default_factory=list)
     hydro_lines: list[str] = field(default_factory=list)
     hydro_polys: list[str] = field(default_factory=list)
-    invasive_points: list[str] = field(default_factory=list)
-    invasive_polys: list[str] = field(default_factory=list)
-    invasive_rasters: list[str] = field(default_factory=list)
-    rare_points: list[str] = field(default_factory=list)
-    rare_polys: list[str] = field(default_factory=list)
-    rare_rasters: list[str] = field(default_factory=list)
-    fauna_points: list[str] = field(default_factory=list)     # птицы и др. (для Corvus)
+    # слои видов и редких экосистем: [{path, category, group, kind, field}], см. SPECIES_*
+    species_layers: list = field(default_factory=list)
     out_dir: str = ""
     report_kv: list = field(default_factory=list)   # кварталы / листы / группы для отчёта; пусто = все
     basemap: bool = True
@@ -199,7 +194,25 @@ class Config:
         known = set(Config.__dataclass_fields__)
         if "shore_min_share_pct" in d and "min_share_pct" not in d:   # прежнее имя параметра
             d["min_share_pct"] = d["shore_min_share_pct"]
+        layers = list(d.get("species_layers") or [])
+        for key, (cat, grp, kind) in LEGACY_SPECIES_KEYS.items():  # прежние поля конфигурации
+            for pth in d.get(key) or []:
+                if not any(l.get("path") == pth for l in layers):
+                    layers.append(dict(path=pth, category=cat, group=grp, kind=kind, field=""))
+        d["species_layers"] = layers
         return Config(**{k: v for k, v in d.items() if k in known})
+
+
+# прежние поля конфигурации (до версии со списком слоёв видов) → категория, группа, тип данных
+LEGACY_SPECIES_KEYS = {
+    "invasive_points": ("инвазивные", "не указана", "points"),
+    "invasive_polys": ("инвазивные", "не указана", "polygons"),
+    "invasive_rasters": ("инвазивные", "не указана", "sdm"),
+    "rare_points": ("охраняемые", "не указана", "points"),
+    "rare_polys": ("охраняемые", "не указана", "polygons"),
+    "rare_rasters": ("охраняемые", "не указана", "sdm"),
+    "fauna_points": ("прочие", "птицы", "points"),
+}
 
 
 def unit_labels(cfg: Config) -> dict:
@@ -236,40 +249,170 @@ LAYER_SPECS = [
          what="реки, ручьи, каналы"),
     dict(key="hydro_polys", title="Гидрография — полигоны", multi=True, kind="vec",
          what="пруды, озёра, водохранилища"),
-    dict(key="invasive_points", title="Инвазионные виды — точки", multi=True, kind="vec",
-         what="точки встреч; поле с латинским названием вида"),
-    dict(key="invasive_polys", title="Инвазионные виды — полигоны", multi=True, kind="vec",
-         what="контуры зарослей"),
-    dict(key="invasive_rasters", title="Инвазионные виды — модели SDM", multi=True, kind="ras",
-         what=f"растры вероятности 0–1; вид = имя файла; порог {SDM_THRESHOLD_INVASIVE:.2f}"),
-    dict(key="rare_points", title="Редкие виды — точки", multi=True, kind="vec",
-         what=f"точки встреч; буфер {RARE_BUFFER_M:.0f} м"),
-    dict(key="rare_polys", title="Редкие виды — полигоны", multi=True, kind="vec",
-         what="контуры местообитаний"),
-    dict(key="rare_rasters", title="Редкие виды — модели SDM", multi=True, kind="ras",
-         what=f"растры вероятности 0–1; вид = имя файла; порог {SDM_THRESHOLD_RARE:.2f}"),
-    dict(key="fauna_points", title="Фауна — точки наблюдений", multi=True, kind="vec",
-         what=f"наблюдения птиц; используется род Corvus, окно {CORVUS_WINDOW_M:.0f} м"),
 ]
 LAYER_TITLE = {s["key"]: s["title"] for s in LAYER_SPECS}
+LAYER_TITLE["species"] = "Слои видов и редких экосистем"
 
-# правило → требования: список групп «хотя бы один слой из группы»; opt — улучшают результат
-RULE_REQS = {
-    "corvus": dict(label="плотность врановых (окно %.0f м, верхний квартиль)" % CORVUS_WINDOW_M,
-                   req=[["fauna_points"]], opt=[]),
-    "slope": dict(label="уклон по ЦМР", req=[["dem_path"]], opt=[]),
-    "invasive": dict(label="встречи и модели инвазионных видов",
-                     req=[["invasive_points", "invasive_polys", "invasive_rasters"]], opt=[]),
-    "rare": dict(label="тропы в зоне редких видов (буфер %.0f м)" % RARE_BUFFER_M,
-                 req=[["rare_points", "rare_polys", "rare_rasters"]], opt=["trails"]),
-    "shore": dict(label="тропы повышенной плотности у воды (%.0f м)" % SHORE_BUFFER_M,
-                  req=[["trails"], ["hydro_lines", "hydro_polys"]], opt=[]),
-    "trail_hotspot": dict(label="растровая плотность троп, окно %.0f м, верхний квартиль" % TRAIL_WINDOW_M,
-                          req=[["trails"]], opt=[]),
-    "trail_density": dict(label="плотность троп на полигон (м/га), верхний квартиль",
-                          req=[["trails"]], opt=[]),
-    "type": dict(label="по типу полигона", req=[], opt=[]),
+# ---- слои видов и редких экосистем ---------------------------------------------------
+# Каждый слой описывается категорией, группой организмов и типом данных. Мероприятия
+# выбирают слои по этим признакам (столбцы «Виды: …» таблицы мероприятий).
+SPECIES_CATEGORIES = ["инвазивные", "охраняемые", "прочие"]
+SPECIES_CATEGORY_HELP = {
+    "инвазивные": "чужеродные инвазивные виды",
+    "охраняемые": "виды Красной книги и другие охраняемые или редкие виды, редкие экосистемы",
+    "прочие": "прочие наблюдения (например, все птицы — для плотности врановых)",
 }
+SPECIES_GROUPS = ["сосудистые растения", "грибы", "лишайники", "млекопитающие", "птицы",
+                  "низшие позвоночные", "насекомые", "редкие экосистемы", "не указана"]
+SPECIES_KINDS = {"points": "точки", "polygons": "полигоны", "sdm": "SDM (растр 0–1)"}
+RASTER_EXT = (".tif", ".tiff", ".asc", ".img", ".vrt")
+
+
+def norm_category(v) -> str:
+    t = str(v or "").strip().lower().replace("ё", "е")
+    if not t:
+        return ""
+    if t.startswith(("инваз", "чужерод")):
+        return "инвазивные"
+    if t.startswith(("охран", "редк", "краснокниж")):
+        return "охраняемые"
+    if t.startswith(("проч", "друг", "фаун", "наблюд")):
+        return "прочие"
+    return t
+
+
+def norm_group(v) -> str:
+    t = re.sub(r"\s+", " ", str(v or "").strip().lower().replace("ё", "е"))
+    return t or "не указана"
+
+
+def group_matches(layer_group: str, groups) -> bool:
+    """Группа слоя входит в список групп мероприятия (сравнение без учёта окончаний)."""
+    if not groups:
+        return True
+    lg = norm_group(layer_group)
+    for g in groups:
+        g = norm_group(g)
+        n = max(4, min(len(g), len(lg)) - 2)
+        if lg == g or lg[:n] == g[:n]:
+            return True
+    return False
+
+
+def detect_species_kind(path: str) -> str:
+    """Тип данных слоя видов: SDM — растр, иначе по геометрии векторного слоя."""
+    p = str(path).split("|")[0]
+    if p.lower().endswith(RASTER_EXT):
+        return "sdm"
+    layer = str(path).split("|")[1] if "|" in str(path) else None
+    for enc in (None, "latin1"):            # latin1 — если имена полей в другой кодировке
+        try:
+            info = pyogrio.read_info(p, layer=layer, **({"encoding": enc} if enc else {}))
+        except Exception:
+            continue
+        gt = str(info.get("geometry_type") or "")
+        if "Point" in gt:
+            return "points"
+        if "Polygon" in gt:
+            return "polygons"
+        return ""
+    return ""
+
+
+def species_layers(cfg) -> list[dict]:
+    """Нормализованный список слоев видов из конфигурации."""
+    out = []
+    for l in getattr(cfg, "species_layers", None) or []:
+        if isinstance(l, str):
+            l = dict(path=l)
+        pth = l.get("path")
+        if not pth:
+            continue
+        out.append(dict(path=pth, category=norm_category(l.get("category")) or "прочие",
+                        group=norm_group(l.get("group")),
+                        kind=l.get("kind") or detect_species_kind(pth), field=l.get("field") or ""))
+    return out
+
+
+def species_layer_label(l: dict) -> str:
+    return (f"{Path(str(l['path']).split('|')[0]).name} ({l['category']}, {l['group']}, "
+            f"{SPECIES_KINDS.get(l['kind'], l['kind'] or '?')})")
+
+
+# ---- правила назначения ---------------------------------------------------------------
+REQ, SHARED = "__обязательно__", "__окно__"      # параметр обязателен / берётся из окна скрипта
+SPECIES_FILTERS = ("category", "groups", "taxon")
+RULES = {
+    "type": dict(
+        title="по типу полигона", data=[], opt=[],
+        params=dict(types=REQ),
+        help="Назначается всем полигонам указанных типов. Пространственных расчётов нет."),
+    "trail_density": dict(
+        title="плотность троп в полигоне", data=["trails"], opt=[],
+        params=dict(types=None, quantile=0.75),
+        help="Длина троп внутри полигона / площадь полигона (м/га); назначается полигонам с плотностью "
+             "не ниже квантиля среди полигонов этих типов."),
+    "trail_hotspot": dict(
+        title="участки повышенной плотности троп", data=["trails"], opt=[],
+        params=dict(types=None, window=50.0, quantile=0.75, min_ha=0.05, min_share=SHARED),
+        help="Растр плотности троп в скользящем окне; участки не ниже квантиля; назначается полигонам, "
+             "где такие участки занимают заданную площадь и долю."),
+    "shore": dict(
+        title="тропы у водных объектов", data=["trails", "hydro"], opt=[],
+        params=dict(types=None, dist=50.0, window=50.0, quantile=0.75, min_ha=0.01, min_share=SHARED),
+        help="Участки повышенной плотности троп в полосе заданной ширины вокруг линий и полигонов "
+             "гидрографии."),
+    "slope": dict(
+        title="уклон", data=["dem"], opt=[],
+        params=dict(types=None, slope=REQ, min_ha=0.05, min_share=SHARED),
+        help="Участки с уклоном больше порога по ЦМР."),
+    "species": dict(
+        title="виды: находки", data=["species"], opt=[],
+        params=dict(types=None, category=None, groups=None, taxon=None, sources=None, sdm=0.75,
+                    min_ha=0.05, min_share=SHARED),
+        help="Полигоны, где есть точки или полигоны выбранных видов; по моделям SDM — отдельная строка "
+             "«мониторинг»."),
+    "species_trails": dict(
+        title="виды: тропы у находок", data=["species"], opt=["trails"],
+        params=dict(types=None, category=None, groups=None, taxon=None, sources=None, dist=50.0, sdm=0.75,
+                    min_ha=0.05, min_share=SHARED),
+        help="Тропы в заданном расстоянии от точек и внутри полигонов выбранных видов; по моделям SDM — "
+             "отдельная строка «мониторинг»."),
+    "species_density": dict(
+        title="виды: плотность находок", data=["species"], opt=[],
+        params=dict(types=None, category=None, groups=None, taxon=None, window=500.0, quantile=0.75,
+                    min_ha=0.05, min_share=SHARED),
+        help="Растр плотности точек выбранных видов в скользящем окне; участки не ниже квантиля."),
+}
+RULE_TITLES = [v["title"] for v in RULES.values()]
+
+# столбцы таблицы мероприятий, задающие правило (ключ, заголовок, начало заголовка для поиска, пояснение)
+SPEC_COLUMNS = [
+    ("rule", "Правило назначения", "правило", "одно из правил (список); пусто — правило по тексту «Метода выявления»"),
+    ("types", "Типы полигонов", "типы полиг",
+     "типы полигонов слоя территории через запятую: лесные, луговые, водные, околоводные, болотные…; "
+     "«любые» или пусто — все полигоны"),
+    ("category", "Виды: категория", "виды: катег", "инвазивные, охраняемые, прочие (через запятую); «любые» или пусто — все"),
+    ("groups", "Виды: группы организмов", "виды: групп",
+     "сосудистые растения, грибы, лишайники, млекопитающие, птицы, низшие позвоночные, насекомые, "
+     "редкие экосистемы…; «любые» или пусто — все"),
+    ("taxon", "Виды: таксоны (лат.)", "виды: такс",
+     "латинские названия видов или родов через запятую (например, Corvus); пусто — все виды"),
+    ("sources", "Виды: данные", "виды: данн", "точки, полигоны, SDM (через запятую); «любые» или пусто — все"),
+    ("dist", "Расстояние, м", "расстоян", "ширина полосы у воды или радиус вокруг точек видов"),
+    ("window", "Окно плотности, м", "окно", "радиус скользящего окна для растра плотности"),
+    ("quantile", "Квантиль", "квантил", "порог плотности; 0,75 — верхний квартиль"),
+    ("slope", "Уклон более, %", "уклон", "порог уклона, %"),
+    ("sdm", "Порог SDM (0–1)", "порог sdm", "вероятность модели, начиная с которой участок учитывается"),
+    ("min_ha", "Мин. площадь участка, га", "мин. площ", "минимальная площадь участка внутри полигона"),
+    ("min_share", "Мин. доля полигона, %", "мин. дол",
+     "минимальная доля площади полигона под участками; пусто — общий порог из окна скрипта"),
+]
+SPEC_TITLE = {k: t for k, t, _, _ in SPEC_COLUMNS}
+DESC_COLUMN = "Процедура назначения (как работает скрипт)"
+
+TYPE_WORDS = [("околовод", "околовод"), ("болот", "болот"), ("водн", "водн"), ("вод", "водн"),
+              ("лес", "лес"), ("луг", "луг")]
 
 
 def type_matches(type_value, keys) -> bool:
@@ -334,33 +477,329 @@ def classify_measure(measure: dict) -> dict:
 _MIN_SHARE = [25.0]     # текущий порог доли полигона (обновляется из конфигурации)
 
 
-def describe_rule(measure: dict) -> str:
-    """Понятное описание того, как скрипт рассчитывает мероприятие (для отчёта, журнала и окна)."""
+def _fmt(x, nd=2) -> str:
+    """Число для описаний: 0,75; 50; 0,05."""
+    if x is None:
+        return "—"
+    x = float(x)
+    s = f"{x:.{nd}f}".rstrip("0").rstrip(".") if abs(x - round(x)) > 1e-9 else str(int(round(x)))
+    return s.replace(".", ",")
+
+
+def _is_any(t: str) -> bool:
+    t = t.strip().lower()
+    return t in ("", "-", "—", "любые", "любой", "любая", "все", "всё", "any")
+
+
+def _split_list(t) -> list[str]:
+    return [x.strip() for x in re.split(r"[,;/]|\s+и\s+", str(t)) if x.strip()]
+
+
+def parse_types(text):
+    """«лесные, луговые» → (('лес', 'луг'), 'лесные, луговые'); «любые» → None."""
+    t = str(text or "").strip()
+    if _is_any(t):
+        return None
+    keys = []
+    for tok in _split_list(t.lower().replace("ё", "е")):
+        k = next((key for stem, key in TYPE_WORDS if stem in tok), None)
+        if k is None:                      # другой тип: сравнение по началу слова
+            k = tok[:max(4, len(tok) - 2)]
+        if k not in keys:
+            keys.append(k)
+    return (tuple(keys), t) if keys else None
+
+
+def _parse_value(key: str, raw):
+    """Значение ячейки → параметр правила. Возвращает (значение, ошибка)."""
+    if raw is None or (isinstance(raw, float) and np.isnan(raw)) or str(raw).strip() == "":
+        return None, None
+    t = str(raw).strip()
+    if key == "types":
+        return parse_types(t), None
+    if key in ("category", "groups", "sources"):
+        if _is_any(t):
+            return None, None
+        items = _split_list(t)
+        if key == "category":
+            vals = [norm_category(x) for x in items]
+            bad = [x for x, v in zip(items, vals) if v not in SPECIES_CATEGORIES]
+            return (vals, None) if not bad else (None, f"неизвестная категория: {', '.join(bad)}")
+        if key == "groups":
+            return [norm_group(x) for x in items], None
+        vals = []
+        for x in items:
+            xl = x.lower()
+            v = ("points" if xl.startswith("точ") else "polygons" if xl.startswith("полиг") else
+                 "sdm" if xl.startswith(("sdm", "растр", "модел")) else None)
+            if v is None:
+                return None, f"неизвестный тип данных: {x}"
+            vals.append(v)
+        return vals, None
+    if key == "taxon":
+        return (None, None) if _is_any(t) else (_split_list(t), None)
+    try:
+        v = float(t.replace(",", ".").replace("%", "").strip())
+    except ValueError:
+        return None, f"не число: «{t}»"
+    if key == "quantile" and not 0 < v < 1:
+        return None, "квантиль должен быть между 0 и 1"
+    if key == "sdm" and not 0 <= v <= 1:
+        return None, "порог SDM должен быть от 0 до 1"
+    if v < 0:
+        return None, "отрицательное значение"
+    return v, None
+
+
+def rule_from_title(t) -> str | None:
+    s = re.sub(r"\s+", " ", str(t or "").strip().lower().replace("ё", "е"))
+    if not s:
+        return None
+    for k, v in RULES.items():
+        if s == v["title"] or s == k:
+            return k
+    for k, v in RULES.items():                       # без учёта двоеточий и окончаний
+        if re.sub(r"[^а-яa-z ]", "", s) == re.sub(r"[^а-яa-z ]", "", v["title"]):
+            return k
+    return "?"
+
+
+TYPE_KEY_WORD = {"лес": "лесные", "луг": "луговые", "водн": "водные", "околовод": "околоводные", "болот": "болотные"}
+
+
+def types_label(keys) -> str:
+    return ", ".join(TYPE_KEY_WORD.get(k, k) for k in keys)
+
+
+def classify_method_text(measure: dict) -> dict:
+    """Прежний способ: правило по ключевым словам «Метода выявления» (если столбец «Правило назначения» пуст)."""
     c = classify_measure(measure)
     r, pr = c["rule"], c["params"]
     if r is None:
-        return "не рассчитывается: " + c["reason"]
-    sh = f"; участок ≥ {_MIN_SHARE[0]:g}% площади полигона" if _MIN_SHARE[0] > 0 else ""
-    d = {
-        "corvus": f"плотность птиц рода Corvus в окне {CORVUS_WINDOW_M:.0f} м ≥ верхнего квартиля; лесные полигоны",
-        "slope": (f"уклон по ЦМР более {pr.get('threshold_pct', 7):g}% "
-                  + ("в луговых полигонах" if pr.get("type_keys") else "в полигонах любого типа")),
-        "invasive": (f"точки и полигоны инвазионных видов; модели SDM — участки с вероятностью "
-                     f"≥ {SDM_THRESHOLD_INVASIVE:.2f}"),
-        "rare": (f"тропы в {RARE_BUFFER_M:.0f} м от точек редких видов, в их полигонах и в зонах SDM "
-                 f"≥ {SDM_THRESHOLD_RARE:.2f}"),
-        "shore": (f"тропы повышенной плотности (окно {TRAIL_WINDOW_M:.0f} м, верхний квартиль) в "
-                  f"{SHORE_BUFFER_M:.0f} м от водных объектов (линии и полигоны гидрографии); полигоны любого типа"),
-        "trail_hotspot": (f"участки повышенной плотности троп (окно {TRAIL_WINDOW_M:.0f} м, верхний квартиль); "
-                          "лесные полигоны"),
-        "trail_density": "плотность троп на полигон (м/га) ≥ верхнего квартиля; лесные полигоны",
-        "type": f"все полигоны типа «{pr.get('label', '')}»",
-    }[r]
-    if r in ("corvus", "slope", "shore", "trail_hotspot"):
-        d += sh
-    elif r in ("invasive", "rare") and sh:
-        d += f"; зоны SDM — если занимают ≥ {_MIN_SHARE[0]:g}% площади полигона"
-    return d
+        return dict(rule=None, p={}, reason=c["reason"])
+    forest = (TYPE_FOREST, types_label(TYPE_FOREST))
+    if r == "corvus":
+        return dict(rule="species_density", p=dict(types=forest, taxon=["Corvus"], window=CORVUS_WINDOW_M))
+    if r == "slope":
+        return dict(rule="slope", p=dict(types=(TYPE_MEADOW, types_label(TYPE_MEADOW)) if pr.get("type_keys") else None,
+                                         slope=pr["threshold_pct"]))
+    if r == "invasive":
+        return dict(rule="species", p=dict(category=["инвазивные"], sdm=SDM_THRESHOLD_INVASIVE))
+    if r == "rare":
+        return dict(rule="species_trails", p=dict(category=["охраняемые"], dist=RARE_BUFFER_M,
+                                                  sdm=SDM_THRESHOLD_RARE))
+    if r == "shore":
+        return dict(rule="shore", p=dict(dist=SHORE_BUFFER_M, window=TRAIL_WINDOW_M, min_ha=MIN_PATCH_HA / 5))
+    if r in ("trail_hotspot", "trail_density"):
+        return dict(rule=r, p=dict(types=forest))
+    return dict(rule="type", p=dict(types=(tuple(pr["keys"]), types_label(pr["keys"]))))
+
+
+def measure_spec(measure: dict) -> dict:
+    """Полное описание правила мероприятия: rule, p (все параметры), src (откуда взят параметр),
+    origin («таблица» / «текст метода»), errors, reason (почему не рассчитывается)."""
+    raw = measure.get("spec") or {}
+    errors = []
+    rule_raw = raw.get("rule")
+    if rule_raw is not None and str(rule_raw).strip() and str(rule_raw).strip().lower() not in ("nan",):
+        rule = rule_from_title(rule_raw)
+        if rule == "?":
+            return dict(rule=None, p={}, src={}, origin="таблица", errors=[],
+                        reason=f"правило «{rule_raw}» не распознано; допустимы: " + "; ".join(RULE_TITLES))
+        origin, given = "таблица", {}
+        for k, v in raw.items():
+            if k == "rule" or k not in RULES[rule]["params"]:
+                continue
+            val, err = _parse_value(k, v)
+            if err:
+                errors.append(f"{SPEC_TITLE[k]}: {err}")
+            elif val is not None:
+                given[k] = val
+    else:
+        lc = classify_method_text(measure)
+        if lc["rule"] is None:
+            return dict(rule=None, p={}, src={}, origin="текст метода", errors=[], reason=lc["reason"])
+        rule, given, origin = lc["rule"], lc["p"], "текст метода"
+    p, src = {}, {}
+    for k, d in RULES[rule]["params"].items():
+        if k in given:
+            p[k], src[k] = given[k], origin
+        elif d == REQ:
+            p[k], src[k] = None, "не задано"
+            errors.append(f"не задан обязательный параметр «{SPEC_TITLE[k]}»")
+        elif d == SHARED:
+            p[k], src[k] = None, "окно скрипта"
+        else:
+            p[k], src[k] = d, "по умолчанию"
+    return dict(rule=rule, p=p, src=src, origin=origin, errors=errors, reason="")
+
+
+def spec_share(p: dict) -> float:
+    v = p.get("min_share")
+    return float(_MIN_SHARE[0] if v is None else v)
+
+
+def _types_txt(p, any_txt="полигоны любого типа") -> str:
+    t = p.get("types")
+    return any_txt if not t else f"полигоны типа «{t[1]}»"
+
+
+def _q_txt(q) -> str:
+    return "верхний квартиль (0,75)" if abs(float(q) - 0.75) < 1e-9 else f"квантиль {_fmt(q)}"
+
+
+def _sel_txt(p) -> str:
+    """Какие слои видов выбирает мероприятие."""
+    cat = ", ".join(p.get("category") or []) or "любые"
+    grp = ", ".join(p.get("groups") or []) or "любые"
+    parts = [f"категория — {cat}", f"группы — {grp}"]
+    if p.get("taxon"):
+        parts.append("таксоны — " + ", ".join(p["taxon"]))
+    if "sources" in p:
+        parts.append("данные — " + (", ".join(SPECIES_KINDS[s] for s in p["sources"]) if p.get("sources")
+                                    else "точки, полигоны, SDM"))
+    return "; ".join(parts)
+
+
+def _patch_txt(p) -> str:
+    sh = spec_share(p)
+    return (f"участок ≥ {_fmt(p['min_ha'])} га" + (f" и ≥ {_fmt(sh)}% площади полигона" if sh > 0 else ""))
+
+
+def _uses(p, kind) -> bool:
+    return not p.get("sources") or kind in p["sources"]
+
+
+def describe_spec(spec: dict, full: bool = False) -> str:
+    """Описание правила: короткое (журнал, отчёт, окно) или полное (столбец таблицы, окно)."""
+    r, p = spec.get("rule"), spec.get("p", {})
+    if r is None:
+        return "не рассчитывается: " + spec.get("reason", "")
+    if spec.get("errors"):
+        return "не рассчитывается — ошибка в параметрах: " + "; ".join(spec["errors"])
+    if not full:
+        if r == "type":
+            return f"все {_types_txt(p)}"
+        if r == "trail_density":
+            return f"плотность троп на полигон (м/га) ≥ {_q_txt(p['quantile'])}; {_types_txt(p)}"
+        if r == "trail_hotspot":
+            return (f"участки повышенной плотности троп (окно {_fmt(p['window'])} м, {_q_txt(p['quantile'])}); "
+                    f"{_types_txt(p)}; {_patch_txt(p)}")
+        if r == "shore":
+            return (f"участки повышенной плотности троп (окно {_fmt(p['window'])} м, {_q_txt(p['quantile'])}) "
+                    f"в {_fmt(p['dist'])} м от водных объектов; {_types_txt(p)}; {_patch_txt(p)}")
+        if r == "slope":
+            return f"уклон по ЦМР более {_fmt(p['slope'])}%; {_types_txt(p)}; {_patch_txt(p)}"
+        sel = _sel_txt(p)
+        sdm = (f"; SDM ≥ {_fmt(p['sdm'])} — отдельная строка «мониторинг» ({_patch_txt(p)})"
+               if "sdm" in p and _uses(p, "sdm") else "")
+        if r == "species":
+            return f"находки видов ({sel}): полигоны с точками или полигонами находок{sdm}; {_types_txt(p)}"
+        if r == "species_trails":
+            return (f"тропы в {_fmt(p['dist'])} м от точек и в полигонах видов ({sel}){sdm}; {_types_txt(p)}")
+        if r == "species_density":
+            return (f"плотность точек видов ({sel}) в окне {_fmt(p['window'])} м ≥ {_q_txt(p['quantile'])}; "
+                    f"{_types_txt(p)}; {_patch_txt(p)}")
+    # ---- полное описание
+    trails = ("слой троп (если в слое есть поле HIGHWAY или fclass, учитываются типы "
+              + ", ".join(sorted(TRAIL_HIGHWAY_TYPES)) + ")")
+    sh = spec_share(p)
+    share = (f"не меньше {_fmt(p.get('min_ha'))} га и не меньше {_fmt(sh)}% площади полигона" if sh > 0
+             else f"не меньше {_fmt(p.get('min_ha'))} га (порог доли полигона отключён)")
+    tgt_each = "каждого полигона любого типа" if not p.get("types") else f"каждого полигона типа «{p['types'][1]}»"
+    q = _q_txt(p.get("quantile", 0.75))
+    hot = (f"По слою троп строится растр плотности: сетка {_fmt(CELL)} м, круговое скользящее окно радиусом "
+           f"{_fmt(p.get('window'))} м, значение — длина троп в окне на гектар (м/га). По ячейкам внутри ООЗТ с "
+           f"ненулевой плотностью вычисляется {q}; ячейки не ниже него объединяются в участки повышенной "
+           f"плотности троп.")
+    fin = (f"Мероприятие назначается, если такие участки занимают в полигоне {share}. В основании указываются "
+           f"площадь участков и доля полигона; участки работ записываются в слой measure_zones.")
+    sdm = (f"Модели SDM: выделяются участки с вероятностью не ниже {_fmt(p.get('sdm'))}; полигону назначается "
+           f"отдельная строка «… — мониторинг (SDM ≥ {_fmt(p.get('sdm'))})», если участки одного вида занимают в нём "
+           f"не меньше {_fmt(p.get('min_ha'))} га, а все вместе — "
+           + (f"не меньше {_fmt(sh)}% площади полигона." if sh > 0 else "любую долю полигона.")
+           ) if "sdm" in p and _uses(p, "sdm") else ""
+    sp = (f"Слои видов выбираются по признакам, заданным при загрузке: {_sel_txt(p)}. Название вида берётся из "
+          "поля с латинскими названиями (если его нет — из имени файла; у растров SDM — всегда из имени файла).")
+    if r == "type":
+        return (f"Назначается всем {('полигонам типа «' + p['types'][1] + '»') if p.get('types') else 'полигонам'} "
+                "слоя территории. Тип определяется по началу слова (лес…, луг…, болот…); «водные» не включают "
+                "«околоводные». Других данных не требуется.")
+    if r == "trail_density":
+        return (f"Данные: {trails}. Для {tgt_each} считается плотность троп — длина троп внутри полигона, "
+                f"делённая на его площадь (м/га). Среди этих полигонов с ненулевой плотностью вычисляется {q}. "
+                "Мероприятие назначается полигонам с плотностью не ниже порога; полигон оценивается целиком, "
+                "порог доли не применяется. На схеме красным показаны тропы внутри зон повышенной плотности.")
+    if r == "trail_hotspot":
+        return f"Данные: {trails}. 1) {hot} 2) Для {tgt_each} считается площадь таких участков внутри него. {fin}"
+    if r == "shore":
+        return (f"Данные: {trails}; гидрография — линии и полигоны. 1) {hot} 2) Водные объекты объединяются, "
+                f"вокруг них строится полоса шириной {_fmt(p['dist'])} м; сама акватория исключается. 3) Участки "
+                f"повышенной плотности троп обрезаются этой полосой. 4) Для {tgt_each} считается площадь таких "
+                f"участков. {fin}")
+    if r == "slope":
+        return (f"Данные: цифровая модель рельефа, приведённая к сетке {_fmt(CELL)} м. 1) Уклон считается в "
+                "процентах после лёгкого сглаживания (окно 3 × 3 ячейки). 2) Отбираются ячейки внутри ООЗТ с "
+                f"уклоном более {_fmt(p['slope'])}%; одиночные ячейки убираются (морфологическое открытие 2 × 2), "
+                f"остальные объединяются в участки. 3) Для {tgt_each} считается площадь участков. {fin}")
+    if r == "species":
+        parts = [sp]
+        if _uses(p, "points"):
+            parts.append("Точки: мероприятие назначается каждому полигону, внутри которого есть хотя бы одна "
+                         "точка, без порогов площади; в основании — виды, число точек и средние координаты "
+                         "WGS 84 по каждому виду.")
+        if _uses(p, "polygons"):
+            parts.append("Полигоны находок: мероприятие назначается каждому полигону, который с ними "
+                         "пересекается; указывается площадь пересечения по видам.")
+        if sdm:
+            parts.append(sdm)
+        parts.append("Учитываются " + _types_txt(p) + ".")
+        return " ".join(parts)
+    if r == "species_trails":
+        z = []
+        if _uses(p, "points"):
+            z.append(f"круг радиусом {_fmt(p['dist'])} м вокруг каждой точки")
+        if _uses(p, "polygons"):
+            z.append("сами полигоны находок")
+        parts = [sp]
+        if z:
+            parts.append(f"1) Зоны видов — {' и '.join(z)}. 2) Тропы ({trails}) обрезаются по этим зонам. "
+                         "3) Мероприятие назначается каждому полигону, в котором есть хотя бы фрагмент таких "
+                         "троп, без порогов длины и доли; в основании — виды и длина троп в зоне, м. Если слой "
+                         "троп не загружен, мероприятие назначается полигонам, пересекающим сами зоны.")
+        if sdm:
+            parts.append(sdm)
+        parts.append("Учитываются " + _types_txt(p) + ".")
+        return " ".join(parts)
+    if r == "species_density":
+        return (f"{sp} Используются только точки. 1) Строится растр плотности: сетка {_fmt(CELL)} м, круговое окно "
+                f"радиусом {_fmt(p['window'])} м, значение — число точек на гектар. 2) По ячейкам внутри ООЗТ с "
+                f"ненулевой плотностью вычисляется {q}; ячейки не ниже него объединяются в участки. 3) Для "
+                f"{tgt_each} считается площадь участков. {fin}")
+    return ""
+
+
+def describe_rule(measure: dict, full: bool = False) -> str:
+    return describe_spec(measure_spec(measure), full)
+
+
+def spec_params_lines(spec: dict) -> list[str]:
+    """Параметры правила с источником значения — для окна скрипта."""
+    out = []
+    for k, v in spec.get("p", {}).items():
+        src = spec["src"].get(k, "")
+        if k == "types":
+            val = v[1] if v else "любые"
+        elif k in ("category", "groups", "taxon"):
+            val = ", ".join(v) if v else "любые"
+        elif k == "sources":
+            val = ", ".join(SPECIES_KINDS[s] for s in v) if v else "точки, полигоны, SDM"
+        elif k == "min_share":
+            val = f"{_fmt(spec_share(spec['p']))}"
+        else:
+            val = _fmt(v)
+        out.append(f"{SPEC_TITLE[k]}: {val}  ({src})")
+    return out
 
 
 def _cfg_has(cfg: Config, key: str) -> bool:
@@ -368,37 +807,70 @@ def _cfg_has(cfg: Config, key: str) -> bool:
     return bool(v) if not isinstance(v, list) else len(v) > 0
 
 
+def matching_species_layers(cfg, p: dict, kinds=None) -> list[dict]:
+    """Загруженные слои видов, подходящие мероприятию по категории, группе и типу данных."""
+    out = []
+    for l in species_layers(cfg):
+        if p.get("category") and l["category"] not in p["category"]:
+            continue
+        if not group_matches(l["group"], p.get("groups")):
+            continue
+        if kinds is not None and l["kind"] not in kinds:
+            continue
+        if p.get("sources") and l["kind"] not in p["sources"]:
+            continue
+        out.append(l)
+    return out
+
+
+DATA_KEYS = {"dem": ["dem_path"], "trails": ["trails"], "hydro": ["hydro_lines", "hydro_polys"],
+             "species": ["species"]}
+
+
 def measure_status(measure: dict, cfg: Config, type_counts: dict | None = None) -> dict:
-    """Статус мероприятия при текущем наборе данных: ok / missing / off / na (+ текст и нужные слои)."""
-    c = classify_measure(measure)
-    rule = c["rule"]
-    need = []
+    """Статус мероприятия при текущем наборе данных: ok / missing / off / na (+ текст, нужные слои)."""
+    spec = measure_spec(measure)
+    rule, p = spec["rule"], spec.get("p", {})
+    need, layers = [], []
     if rule:
-        need = [" или ".join(LAYER_TITLE[k] for k in grp) for grp in RULE_REQS[rule]["req"]]
-        if rule == "type" or (rule == "slope" and c["params"].get("type_keys")) or rule in (
-                "trail_density", "trail_hotspot", "corvus"):
+        for d in RULES[rule]["data"]:
+            if d == "species":
+                need.append("слои видов (" + _sel_txt(p) + ")")
+            else:
+                need.append(" или ".join(LAYER_TITLE[k] for k in DATA_KEYS[d]))
+        if p.get("types"):
             need.append("поле типа в слое территории")
     need_txt = "; ".join(need) if need else "только слой территории"
+    base = dict(need=need_txt, rule=rule, spec=spec, layers=layers)
     if not measure.get("on"):
-        return dict(state="off", text="выключено в таблице", need=need_txt, rule=rule)
+        return dict(base, state="off", text="выключено в таблице")
     if rule is None:
-        return dict(state="na", text=c["reason"], need="—", rule=None)
-    missing = [grp for grp in RULE_REQS[rule]["req"] if not any(_cfg_has(cfg, k) for k in grp)]
+        return dict(base, state="na", text=spec["reason"], need="—")
+    if spec["errors"]:
+        return dict(base, state="missing", text="ошибка в таблице: " + "; ".join(spec["errors"]))
+    missing = []
+    for d in RULES[rule]["data"]:
+        if d == "species":
+            kinds = ["points"] if rule == "species_density" else None
+            layers[:] = matching_species_layers(cfg, p, kinds)
+            if not layers:
+                missing.append("подходящие слои видов (" + _sel_txt(p) + ")")
+        elif not any(_cfg_has(cfg, k) for k in DATA_KEYS[d]):
+            missing.append(" или ".join(LAYER_TITLE[k] for k in DATA_KEYS[d]))
     if missing:
-        txt = "не хватает: " + "; ".join(" или ".join(LAYER_TITLE[k] for k in grp) for grp in missing)
-        return dict(state="missing", text=txt, need=need_txt, rule=rule)
+        return dict(base, state="missing", text="не хватает: " + "; ".join(missing))
     txt = "будет рассчитано"
-    keys = c["params"].get("keys") or c["params"].get("type_keys") or (
-        TYPE_FOREST if rule in ("trail_density", "trail_hotspot", "corvus") else None)
+    keys = (p.get("types") or (None,))[0]
     if keys and type_counts is not None:
         n = sum(v for t, v in type_counts.items() if type_matches(t, keys))
         if n == 0:
-            return dict(state="missing", text="в слое нет полигонов типа «%s»" % "/".join(keys),
-                        need=need_txt, rule=rule)
-        txt += f" ({n} полигонов типа «{'/'.join(keys)}»)"
-    if rule == "rare" and not cfg.trails:
+            return dict(base, state="missing", text="в слое нет полигонов типа «%s»" % p["types"][1])
+        txt += f" ({n} полигонов типа «{p['types'][1]}»)"
+    if layers:
+        txt += f"; слоёв видов: {len(layers)}"
+    if rule == "species_trails" and not cfg.trails:
         txt += " — без троп: по самим зонам видов"
-    return dict(state="ok", text=txt, need=need_txt, rule=rule)
+    return dict(base, state="ok", text=txt)
 
 
 # =====================================================================================
@@ -528,6 +1000,17 @@ class SetupWindow:
         self.l_xlsx = ttk.Label(s1, foreground=self.C_MUTED, font=self.f_small,
                                 text="Excel «Мероприятия по Приказу»: колонки «Мероприятия», «Вкл/выкл», «Метод выявления»")
         self.l_xlsx.pack(anchor="w", pady=(4, 0))
+        ttk.Label(s1, foreground=self.C_MUTED, font=self.f_small, wraplength=700, justify="left",
+                  text="Способ назначения задаётся столбцами таблицы: «Правило назначения», «Типы полигонов», "
+                       "«Виды: категория», «Виды: группы организмов», «Виды: таксоны (лат.)», «Виды: данные», "
+                       "«Расстояние, м», «Окно плотности, м», «Квантиль», «Уклон более, %», «Порог SDM (0–1)», "
+                       "«Мин. площадь участка, га», «Мин. доля полигона, %». Если «Правило назначения» пусто, "
+                       "правило определяется по тексту «Метода выявления». Справка — на листе «Справка по правилам»."
+                  ).pack(anchor="w", pady=(2, 0))
+        r = ttk.Frame(s1); r.pack(fill="x", pady=(4, 0))
+        ttk.Button(r, text="Записать правила и описания в таблицу…", command=self._update_table).pack(side="left")
+        ttk.Label(r, foreground=self.C_MUTED, font=self.f_small,
+                  text="  столбцы правил, справка, описания расчёта").pack(side="left")
 
         # 2. слой территории
         s2 = ttk.LabelFrame(self.left, text=" 2. Слой территории — единицы назначения мероприятий (обязательно) ",
@@ -593,6 +1076,7 @@ class SetupWindow:
                   ).pack(anchor="w", pady=(0, 4))
         for spec in LAYER_SPECS:
             self._layer_row(s3, spec)
+        self._species_block(s3)
 
         # ---- правая колонка
         right = ttk.Frame(pw, padding=(8, 0, 0, 0))
@@ -619,10 +1103,15 @@ class SetupWindow:
         self.tree.pack(side="left", fill="both", expand=True)
         ys.pack(side="right", fill="y")
         self.tree.bind("<<TreeviewSelect>>", self._on_select)
-        self.detail = tk.Text(s4, height=6, wrap="word", relief="flat", background="#F4F5F6",
+        df_ = ttk.Frame(s4); df_.pack(fill="both", expand=False, pady=(6, 0))
+        self.detail = tk.Text(df_, height=14, wrap="word", relief="flat", background="#F4F5F6",
                               font=self.f_small, padx=6, pady=4)
-        self.detail.pack(fill="x", pady=(6, 0))
-        self.detail.insert("1.0", "Выберите мероприятие в списке, чтобы увидеть метод выявления и нужные слои.")
+        dsb = ttk.Scrollbar(df_, orient="vertical", command=self.detail.yview)
+        self.detail.configure(yscrollcommand=dsb.set)
+        self.detail.pack(side="left", fill="both", expand=True)
+        dsb.pack(side="right", fill="y")
+        self.detail.insert("1.0", "Выберите мероприятие в списке, чтобы увидеть правило назначения, его параметры, "
+                                  "полное описание расчёта и нужные слои.")
         self.detail.configure(state="disabled")
 
         s5 = ttk.LabelFrame(right, text=" 5. Результаты ", padding=8)
@@ -642,10 +1131,10 @@ class SetupWindow:
         ttk.Checkbutton(s5, text="Подложка OpenStreetMap на схемах (нужен интернет)",
                         variable=self.v_basemap).pack(anchor="w", pady=(6, 0))
         r = ttk.Frame(s5); r.pack(fill="x", pady=(4, 0))
-        ttk.Label(r, text="Порог: участок-основание (тропы, уклон, вороны, SDM) не меньше").pack(side="left")
+        ttk.Label(r, text="Общий порог: участок-основание не меньше").pack(side="left")
         self.v_minshare = tk.StringVar(value="25")
         ttk.Entry(r, textvariable=self.v_minshare, width=5).pack(side="left", padx=4)
-        ttk.Label(r, text="% площади полигона (0 — без порога)").pack(side="left")
+        ttk.Label(r, text="% площади полигона (0 — без порога; если в таблице не указан свой)").pack(side="left")
         self.v_split = tk.BooleanVar(value=True)
         ttk.Checkbutton(s5, text="Делить многочастные объекты на отдельные контуры (ID-1, ID-2, …) — "
                                  "мероприятие назначается каждому контуру",
@@ -702,6 +1191,211 @@ class SetupWindow:
                           wraplength=640, justify="left")
         files.grid(row=3, column=1, columnspan=2, sticky="w")
         self.layer_rows[key] = dict(status=st, used=used, files=files, spec=spec)
+
+    # ------------------------------------------------------------------ слои видов
+    SP_TYPES = [("Слои видов (векторы и растры SDM)",
+                 "*.shp *.gpkg *.geojson *.json *.kml *.gml *.tif *.tiff *.asc *.img *.vrt"), ("Все файлы", "*.*")]
+
+    def _species_block(self, parent):
+        tk, ttk = self.tk, self.ttk
+        card = ttk.Frame(parent, padding=(0, 6, 0, 4))
+        card.pack(fill="x")
+        card.columnconfigure(1, weight=1)
+        self.sp_status = ttk.Label(card, text="○", width=2, foreground=self.C_OFF, font=self.f_bold)
+        self.sp_status.grid(row=0, column=0, sticky="w")
+        ttk.Label(card, text="Виды и редкие экосистемы", font=self.f_bold).grid(row=0, column=1, sticky="w")
+        bf = ttk.Frame(card)
+        bf.grid(row=0, column=2, sticky="ne")
+        ttk.Button(bf, text="Добавить…", width=11, command=self._sp_add).pack(side="left")
+        ttk.Button(bf, text="Удалить", width=9, command=self._sp_remove).pack(side="left", padx=(4, 0))
+        ttk.Label(card, foreground=self.C_MUTED, font=self.f_small, wraplength=640, justify="left",
+                  text="Точки и полигоны находок (shp, gpkg…) или модели SDM (растры 0–1); можно выбрать сразу "
+                       "несколько файлов. Для каждого слоя укажите категорию (инвазивные / охраняемые / прочие) и "
+                       "группу организмов; тип данных определяется автоматически. Мероприятия выбирают слои по "
+                       "этим признакам — столбцы «Виды: …» таблицы мероприятий."
+                  ).grid(row=1, column=1, columnspan=2, sticky="w")
+        tf = ttk.Frame(card)
+        tf.grid(row=2, column=1, columnspan=2, sticky="we", pady=(4, 0))
+        cols = ("file", "kind", "category", "group", "field")
+        self.sp_tree = ttk.Treeview(tf, columns=cols, show="headings", selectmode="extended", height=5)
+        for c, t, w in (("file", "Файл", 190), ("kind", "Тип данных", 130), ("category", "Категория", 100),
+                        ("group", "Группа организмов", 150), ("field", "Поле названия", 90)):
+            self.sp_tree.heading(c, text=t, anchor="w")
+            self.sp_tree.column(c, width=w, stretch=(c == "file"), anchor="w")
+        ys = ttk.Scrollbar(tf, orient="vertical", command=self.sp_tree.yview)
+        self.sp_tree.configure(yscrollcommand=ys.set)
+        self.sp_tree.pack(side="left", fill="x", expand=True)
+        ys.pack(side="right", fill="y")
+        self.sp_tree.bind("<<TreeviewSelect>>", self._sp_on_select)
+        ed = ttk.Frame(card)
+        ed.grid(row=3, column=1, columnspan=2, sticky="w", pady=(4, 0))
+        self.v_sp_cat = tk.StringVar(value="охраняемые")
+        self.v_sp_grp = tk.StringVar(value="сосудистые растения")
+        self.v_sp_kind = tk.StringVar(value="")
+        self.v_sp_field = tk.StringVar(value="авто")
+        ttk.Label(ed, text="Категория:").grid(row=0, column=0, sticky="w")
+        ttk.Combobox(ed, textvariable=self.v_sp_cat, values=SPECIES_CATEGORIES, state="readonly",
+                     width=12).grid(row=0, column=1, sticky="w", padx=(4, 10))
+        ttk.Label(ed, text="Группа:").grid(row=0, column=2, sticky="w")
+        ttk.Combobox(ed, textvariable=self.v_sp_grp, values=SPECIES_GROUPS, width=20
+                     ).grid(row=0, column=3, sticky="w", padx=(4, 10))
+        ttk.Label(ed, text="Тип данных:").grid(row=1, column=0, sticky="w", pady=(4, 0))
+        ttk.Combobox(ed, textvariable=self.v_sp_kind, values=list(SPECIES_KINDS.values()), state="readonly",
+                     width=14).grid(row=1, column=1, sticky="w", padx=(4, 10), pady=(4, 0))
+        ttk.Label(ed, text="Поле названия:").grid(row=1, column=2, sticky="w", pady=(4, 0))
+        self.cb_sp_field = ttk.Combobox(ed, textvariable=self.v_sp_field, values=["авто"], width=20)
+        self.cb_sp_field.grid(row=1, column=3, sticky="w", padx=(4, 10), pady=(4, 0))
+        ttk.Button(ed, text="Применить к выбранным", command=self._sp_apply).grid(row=0, column=4, rowspan=2,
+                                                                                 sticky="w")
+        ttk.Label(card, foreground=self.C_MUTED, font=self.f_small, wraplength=640, justify="left",
+                  text="Группу можно ввести вручную (новые группы организмов). «Поле названия: авто» — поле с "
+                       "латинскими названиями ищется само; для редких экосистем выберите поле с названием. "
+                       "У растров SDM название вида — имя файла."
+                  ).grid(row=4, column=1, columnspan=2, sticky="w", pady=(2, 0))
+        self.sp_used = ttk.Label(card, text="", font=self.f_small, wraplength=640, justify="left")
+        self.sp_used.grid(row=5, column=1, columnspan=2, sticky="w", pady=(2, 0))
+        ttk.Separator(parent, orient="horizontal").pack(fill="x")
+
+    @staticmethod
+    def _sp_guess(path: str, cat: str, grp: str):
+        n = Path(path).stem.lower()
+        if any(w in n for w in ("invas", "инваз", "alien", "чужерод")):
+            cat = "инвазивные"
+        elif any(w in n for w in ("rare", "redbook", "red_book", "редк", "красн", "охран", "protect")):
+            cat = "охраняемые"
+        for words, g in ((("vascular", "plant", "сосуд", "flora", "растен"), "сосудистые растения"),
+                         (("fung", "гриб", "myco"), "грибы"), (("lichen", "лишай"), "лишайники"),
+                         (("mamm", "млекоп", "theri"), "млекопитающие"), (("aves", "bird", "птиц", "орнит"), "птицы"),
+                         (("amph", "rept", "herp", "fish", "земновод", "пресмык", "рыб", "низш"), "низшие позвоночные"),
+                         (("insect", "насеком", "entom"), "насекомые"),
+                         (("ecosys", "экосист", "habitat", "сообществ"), "редкие экосистемы")):
+            if any(w in n for w in words):
+                grp = g
+                break
+        return cat, grp
+
+    def _sp_add(self):
+        from tkinter import filedialog
+        ps = list(filedialog.askopenfilenames(parent=self.root, title="Слои видов и редких экосистем — можно "
+                                              "выбрать несколько", filetypes=self.SP_TYPES))
+        if not ps:
+            return
+        cur = list(self.cfg.species_layers or [])
+        have = {l.get("path") for l in cur}
+        for pth in ps:
+            if pth in have:
+                continue
+            cat, grp = self._sp_guess(pth, self.v_sp_cat.get(), norm_group(self.v_sp_grp.get()))
+            cur.append(dict(path=pth, category=cat, group=grp, kind=detect_species_kind(pth), field=""))
+        self.cfg.species_layers = cur
+        self._sp_render()
+        self._refresh()
+
+    def _sp_remove(self):
+        sel = {int(i) for i in self.sp_tree.selection()}
+        if not sel:
+            return
+        self.cfg.species_layers = [l for i, l in enumerate(self.cfg.species_layers or []) if i not in sel]
+        self._sp_render()
+        self._refresh()
+
+    def _sp_on_select(self, _e=None):
+        sel = [int(i) for i in self.sp_tree.selection()]
+        if not sel:
+            return
+        l = (self.cfg.species_layers or [])[sel[0]]
+        self.v_sp_cat.set(norm_category(l.get("category")) or "прочие")
+        self.v_sp_grp.set(norm_group(l.get("group")))
+        self.v_sp_kind.set(SPECIES_KINDS.get(l.get("kind") or "", ""))
+        self.v_sp_field.set(l.get("field") or "авто")
+        vals = ["авто"]
+        if len(sel) == 1 and l.get("kind") in ("points", "polygons"):
+            try:
+                pth = str(l["path"])
+                cols, _ = _vector_fields(pth.split("|")[0], pth.split("|")[1] if "|" in pth else None)
+                vals += [c for c in cols if c.lower() not in ("geometry",)]
+            except Exception:
+                pass
+        self.cb_sp_field.configure(values=vals)
+
+    def _sp_apply(self):
+        sel = [int(i) for i in self.sp_tree.selection()]
+        if not sel:
+            from tkinter import messagebox
+            messagebox.showinfo("Слои видов", "Выберите в списке один или несколько слоёв.", parent=self.root)
+            return
+        kind = {v: k for k, v in SPECIES_KINDS.items()}.get(self.v_sp_kind.get())
+        fld = self.v_sp_field.get().strip()
+        for i in sel:
+            l = self.cfg.species_layers[i]
+            l["category"] = norm_category(self.v_sp_cat.get()) or "прочие"
+            l["group"] = norm_group(self.v_sp_grp.get())
+            if kind:
+                l["kind"] = kind
+            if len(sel) == 1:
+                l["field"] = "" if fld in ("", "авто") else fld
+        self._sp_render()
+        for i in sel:
+            self.sp_tree.selection_add(str(i))
+        self._refresh()
+
+    def _sp_render(self):
+        self.sp_tree.delete(*self.sp_tree.get_children())
+        for i, l in enumerate(self.cfg.species_layers or []):
+            kind = l.get("kind") or detect_species_kind(l.get("path", ""))
+            l["kind"] = kind
+            self.sp_tree.insert("", "end", iid=str(i), values=(
+                Path(str(l.get("path", "")).split("|")[0]).name, SPECIES_KINDS.get(kind, "? не определён"),
+                norm_category(l.get("category")) or "прочие", norm_group(l.get("group")), l.get("field") or "авто"))
+
+    def _sp_refresh_status(self, statuses):
+        n = len(self.cfg.species_layers or [])
+        parts, bad = [], False
+        for m, s in zip(self.measures, statuses):
+            if not (s["rule"] and "species" in RULES[s["rule"]]["data"]) or not m["on"]:
+                continue
+            k = len(matching_species_layers(self.cfg, s["spec"].get("p", {}),
+                                            ["points"] if s["rule"] == "species_density" else None))
+            parts.append(f"{m.get('code') or '?'} ({_sel_txt(s['spec'].get('p', {}))}) — слоёв: {k}")
+            bad |= k == 0
+        txt = ("Нужны для включённых: " + ";  ".join(parts)) if parts else "Не нужны включённым мероприятиям"
+        self.sp_used.configure(text=txt, foreground="#202124" if parts else self.C_MUTED)
+        if n and not bad:
+            self.sp_status.configure(text="✔", foreground=self.C_OK)
+        elif parts and bad:
+            self.sp_status.configure(text="!", foreground=self.C_WARN)
+        else:
+            self.sp_status.configure(text="✔" if n else "○", foreground=self.C_OK if n else self.C_OFF)
+
+    def _update_table(self):
+        from tkinter import messagebox
+        if not self.cfg.measures_xlsx:
+            messagebox.showinfo("Таблица мероприятий", "Сначала выберите таблицу мероприятий.", parent=self.root)
+            return
+        if not messagebox.askyesno(
+                "Записать правила и описания в таблицу",
+                "В таблицу мероприятий будут записаны:\n\n"
+                "• столбцы правил («Правило назначения», «Типы полигонов», «Виды: …», «Расстояние, м» и др.) — "
+                "только в строках, где «Правило назначения» пусто: правило и параметры, которые скрипт сейчас "
+                "определяет по тексту «Метода выявления»;\n"
+                "• выпадающие списки в этих столбцах;\n"
+                "• лист «Справка по правилам»;\n"
+                f"• столбец «{DESC_COLUMN}» — полное описание расчёта для каждой строки.\n\n"
+                "Перед записью создаётся копия таблицы с окончанием «_до_правил». Файл должен быть закрыт в Excel. "
+                "Продолжить?", parent=self.root):
+            return
+        try:
+            info = update_measures_xlsx(self.cfg.measures_xlsx, self._collect())
+        except PermissionError:
+            messagebox.showerror("Таблица мероприятий", "Файл открыт в другой программе (Excel). Закройте его "
+                                 "и повторите.", parent=self.root)
+            return
+        except Exception as e:
+            messagebox.showerror("Таблица мероприятий", f"Не удалось записать: {e}", parent=self.root)
+            return
+        self._read_measures()
+        self._refresh()
+        messagebox.showinfo("Таблица мероприятий", info, parent=self.root)
 
     # ------------------------------------------------------------------ выбор файлов
     def _ask(self, kind, multi, title):
@@ -879,9 +1573,11 @@ class SetupWindow:
             s = measure_status(m, cfg, self.type_counts)
             statuses.append(s)
             if s["rule"]:
-                for grp in RULE_REQS[s["rule"]]["req"] + [RULE_REQS[s["rule"]]["opt"]]:
-                    for k in grp:
-                        need_by[k].append((m.get("code") or "?", m["on"]))
+                for d in RULES[s["rule"]]["data"] + RULES[s["rule"]]["opt"]:
+                    for k in DATA_KEYS[d]:
+                        if k in need_by:
+                            need_by[k].append((m.get("code") or "?", m["on"]))
+        self._sp_refresh_status(statuses)
         for key, row in self.layer_rows.items():
             val = getattr(cfg, key)
             files = val if isinstance(val, list) else ([val] if val else [])
@@ -927,16 +1623,30 @@ class SetupWindow:
             return
         i = int(sel[0])
         m, s = self.measures[i], self._statuses[i]
-        rule = s["rule"]
+        spec = s["spec"]
         lines = [f"{m.get('code', '')} {m['name']}".strip(),
                  f"Пункт Приказа: {m.get('prikaz') or '—'};  тип экосистемы: {m.get('eco') or '—'};  "
                  f"Вкл/выкл: {'1' if m['on'] else '0'}",
-                 f"Метод выявления (Excel): {m.get('method') or '—'}"]
-        if rule:
-            lines.append(f"Как рассчитывается: {describe_rule(m)}")
+                 f"Метод выявления (Excel): {m.get('method') or '—'}", ""]
+        if spec["rule"]:
+            how = ("из столбца «Правило назначения»" if spec["origin"] == "таблица" else
+                   "определено по тексту «Метода выявления» (столбец «Правило назначения» пуст)")
+            lines.append(f"Правило: {RULES[spec['rule']]['title']} — {how}")
+            lines.append("Параметры (в скобках — откуда взято значение):")
+            lines += ["  • " + x for x in spec_params_lines(spec)]
+            lines += ["", "Как рассчитывается: " + describe_spec(spec, full=True), ""]
             lines.append(f"Нужные данные: {s['need']}")
-            if RULE_REQS[rule]["opt"]:
-                lines.append("Дополнительно используется: " + ", ".join(LAYER_TITLE[k] for k in RULE_REQS[rule]["opt"]))
+            if RULES[spec["rule"]]["opt"]:
+                lines.append("Дополнительно используется: " +
+                             ", ".join(LAYER_TITLE[k] for d in RULES[spec["rule"]]["opt"] for k in DATA_KEYS[d]))
+            if "species" in RULES[spec["rule"]]["data"]:
+                ls = matching_species_layers(self.cfg, spec["p"],
+                                             ["points"] if spec["rule"] == "species_density" else None)
+                lines.append("Подходящие слои видов: " + ("; ".join(species_layer_label(l) for l in ls) or "нет"))
+        else:
+            lines.append("Правило: не задано — " + spec.get("reason", ""))
+        if spec.get("errors"):
+            lines.append("Ошибки в столбцах правил: " + "; ".join(spec["errors"]))
         lines.append(f"Статус: {s['text']}")
         self.detail.configure(state="normal")
         self.detail.delete("1.0", "end")
@@ -958,6 +1668,7 @@ class SetupWindow:
         for k, v in self.v_formats.items():
             v.set(k in (cfg.report_formats or []))
         self.field_vars = {}
+        self._sp_render()
         if cfg.measures_xlsx:
             self._read_measures()
         self._setup_layer_combo()
@@ -1422,20 +2133,21 @@ def _part_ids(ids: pd.Series, g: gpd.GeoDataFrame) -> pd.Series:
 class Data:
     """Все загруженные слои в WORK_EPSG + служебные объекты."""
 
-    def __init__(self, cfg: Config, oozt_only: bool = False):
+    def __init__(self, cfg: Config, oozt_only: bool = False, pad_m: float = 0.0):
         global _CUR_CFG
         self.cfg = cfg
         _CUR_CFG = cfg
         self.oozt = self._load_oozt()
         self.union = unary_union(self.oozt.geometry.values)
         self.bounds = tuple(self.oozt.total_bounds)
-        pad = max(TRAIL_WINDOW_M, CORVUS_WINDOW_M, RARE_BUFFER_M, SHORE_BUFFER_M) + 2 * CELL
+        pad = max(TRAIL_WINDOW_M, CORVUS_WINDOW_M, RARE_BUFFER_M, SHORE_BUFFER_M, pad_m) + 2 * CELL
         b = self.bounds
         self.bounds_pad = (b[0] - pad, b[1] - pad, b[2] + pad, b[3] + pad)
         self.bbox_wgs84 = tuple(gpd.GeoSeries([box(*self.bounds_pad)], crs=WORK_EPSG).to_crs(4326).total_bounds)
         self.clip = box(*self.bounds_pad)
         self.trails = self.hydro_lines = self.hydro_polys = None
-        self.inv_pts = self.inv_polys = self.rare_pts = self.rare_polys = self.fauna_pts = None
+        self.sp_points = self.sp_polys = None     # находки видов: species, category, group, layer, __src
+        self.sp_rasters: list[dict] = []          # модели SDM: path, category, group, species
         self.dem = None
         self._inside = None
         if oozt_only:                      # режим --report-only: остальные слои не нужны
@@ -1444,11 +2156,7 @@ class Data:
         self.trails = self._load_trails()
         self.hydro_lines = read_many(cfg.hydro_lines, self.bbox_wgs84, self.clip)
         self.hydro_polys = read_many(cfg.hydro_polys, self.bbox_wgs84, self.clip)
-        self.inv_pts = self._load_species_points(cfg.invasive_points)
-        self.inv_polys = self._load_species_polys(cfg.invasive_polys)
-        self.rare_pts = self._load_species_points(cfg.rare_points)
-        self.rare_polys = self._load_species_polys(cfg.rare_polys)
-        self.fauna_pts = self._load_species_points(cfg.fauna_points)
+        self.sp_points, self.sp_polys, self.sp_rasters = self._load_species_layers(species_layers(cfg))
         self.dem = None
         if cfg.dem_path:
             try:
@@ -1590,35 +2298,42 @@ class Data:
         return g if not g.empty else None
 
     # ---- виды ----
-    def _load_species_points(self, paths):
-        g = read_many(paths, self.bbox_wgs84, self.clip)
-        if g is None:
-            return None
-        g = g[g.geom_type.isin(["Point", "MultiPoint"])].explode(index_parts=False)
-        if g.empty:
-            log.warning("Точки видов %s: нет объектов в границах ООЗТ — слой не используется",
-                        ", ".join(map(str, paths if isinstance(paths, (list, tuple)) else [paths])))
-            return None
-        col = detect_species_column(g)
-        g["species"] = g[col].astype(str).str.strip() if col else g["__src"]
-        if col:
-            log.info("Точки видов %s: поле вида «%s», %d видов, %d точек", ", ".join(map(str, g["__src"].unique())), col,
-                     g["species"].nunique(), len(g))
-        else:
-            log.warning("Точки видов %s: поле с латинскими названиями не найдено — вид = имя файла", ", ".join(map(str, g["__src"].unique())))
-        return g[["species", "__src", "geometry"]]
-
-    def _load_species_polys(self, paths):
-        g = read_many(paths, self.bbox_wgs84, self.clip)
-        if g is None:
-            return None
-        g = g[g.geom_type.isin(["Polygon", "MultiPolygon"])].copy()
-        if g.empty:
-            log.warning("Полигоны видов: нет объектов в границах ООЗТ — слой не используется")
-            return None
-        col = detect_species_column(g)
-        g["species"] = g[col].astype(str).str.strip() if col else g["__src"]
-        return g[["species", "__src", "geometry"]]
+    def _load_species_layers(self, layers):
+        """Слои видов → общие таблицы точек и полигонов + список растров SDM (с категорией и группой)."""
+        pts, polys, rasters = [], [], []
+        for i, l in enumerate(layers):
+            name = Path(str(l["path"]).split("|")[0]).name
+            tag = f"{l['category']}, {l['group']}"
+            if l["kind"] == "sdm":
+                rasters.append(dict(l, species=species_from_filename(str(l["path"]).split("|")[0]), layer=i))
+                log.info("Слой видов %s (%s): модель SDM, вид «%s»", name, tag, rasters[-1]["species"])
+                continue
+            if l["kind"] not in ("points", "polygons"):
+                log.warning("Слой видов %s: не удалось определить тип данных — слой не используется", name)
+                continue
+            g = read_many([l["path"]], self.bbox_wgs84, self.clip)
+            want = ["Point", "MultiPoint"] if l["kind"] == "points" else ["Polygon", "MultiPolygon"]
+            if g is not None:
+                g = g[g.geom_type.isin(want)]
+                if l["kind"] == "points":
+                    g = g.explode(index_parts=False)
+            if g is None or g.empty:
+                log.warning("Слой видов %s (%s): нет объектов в границах ООЗТ — слой не используется", name, tag)
+                continue
+            g = g.copy()
+            col = l["field"] if l.get("field") in g.columns else detect_species_column(g)
+            g["species"] = g[col].astype(str).str.strip() if col else g["__src"]
+            g["category"], g["group"], g["layer"] = l["category"], l["group"], i
+            if col:
+                log.info("Слой видов %s (%s, %s): поле вида «%s», %d видов, %d объектов", name, tag,
+                         SPECIES_KINDS[l["kind"]], col, g["species"].nunique(), len(g))
+            else:
+                log.warning("Слой видов %s (%s): поле с латинскими названиями не найдено — вид = имя файла",
+                            name, tag)
+            (pts if l["kind"] == "points" else polys).append(
+                g[["species", "category", "group", "layer", "__src", "geometry"]])
+        cat = lambda parts: gpd.GeoDataFrame(pd.concat(parts, ignore_index=True), crs=WORK_EPSG) if parts else None
+        return cat(pts), cat(polys), rasters
 
     # ---- маска «внутри ООЗТ» на сетке CELL ----
     def inside_mask(self, transform, shp):
@@ -1698,7 +2413,7 @@ def _unit_word() -> str:
 
 
 def _overlay_patches_to_vydels(data: Data, patches: gpd.GeoDataFrame, target: gpd.GeoDataFrame,
-                               min_ha=MIN_PATCH_HA):
+                               min_ha=MIN_PATCH_HA, share_pct: float | None = None):
     """Пересечение полигонов-пятен с выделами; возвращает DataFrame uid → площадь пятен (га), доля."""
     if patches is None or patches.empty or target.empty:
         return pd.DataFrame(columns=["uid", "patch_ha", "share"])
@@ -1708,7 +2423,7 @@ def _overlay_patches_to_vydels(data: Data, patches: gpd.GeoDataFrame, target: gp
     df = pd.DataFrame({"uid": target["uid"].values, "patch_ha": ha.values,
                        "share": (ha / target["area_ha"]).values})
     df = df[df["patch_ha"] >= min_ha]
-    thr = _min_share(data)
+    thr = _min_share(data) if share_pct is None else float(share_pct)
     if thr > 0 and len(df):
         n0 = len(df)
         df = df[df["share"] * 100 >= thr]
@@ -1723,35 +2438,73 @@ def _min_share(data) -> float:
         return 0.0
 
 
-def rule_type(data: Data, res: Results, measure: dict, keys, label):
+def _target(data: Data, p: dict) -> gpd.GeoDataFrame:
+    t = p.get("types")
+    return data.vydels_of_type(*t[0]) if t else data.oozt
+
+
+def _qtag(q) -> str:
+    return f"Q{int(round(float(q) * 100))}"
+
+
+def _eco_label(p: dict) -> str:
+    t = p.get("types")
+    if not t:
+        return "в любых экосистемах"
+    if len(t[0]) == 1 and t[0][0] == "луг":
+        return "в луговых экосистемах"
+    return f"в полигонах типа «{t[1]}»"
+
+
+def rule_type(data: Data, res: Results, measure: dict, p: dict):
     """Назначение по типу выдела."""
+    keys, label = p["types"]
     sel = data.vydels_of_type(*keys)
     for _, r in sel.iterrows():
         res.add(r, measure, f"тип {_unit_word()} «{r['Type']}» ({label})")
     log.info("  → %d %s", len(sel), _units())
 
 
-def rule_trail_density_vydel(data: Data, res: Results, measure: dict, type_keys=TYPE_FOREST):
-    """Плотность троп (м/га) по выделу; верхний квартиль среди выделов всех ООЗТ заданного типа."""
+def _trail_hotspots(data: Data, window=TRAIL_WINDOW_M, q=QUANTILE):
+    """Кэш: участки ≥ квантиля плотности троп в окне window (по ячейкам внутри ООЗТ)."""
+    cache = data.__dict__.setdefault("_hot_cache", {})
+    key = (float(window), float(q))
+    if key in cache:
+        return cache[key]
+    if data.trails is None:
+        cache[key] = (None, None, None)
+        return cache[key]
+    dens, tr = line_density(data.trails, data.bounds_pad, window, CELL)
+    inside = data.inside_mask(tr, dens.shape)
+    mask, thr = upper_quantile_mask(dens, inside, q)
+    polys = polygonize_mask(mask, tr)
+    log.info("  плотность троп (окно %.0f м): порог %s = %.0f м/га, %d пятен", window, _qtag(q), thr, len(polys))
+    cache[key] = (polys, thr, (dens, tr))
+    return cache[key]
+
+
+def rule_trail_density_vydel(data: Data, res: Results, measure: dict, p: dict):
+    """Плотность троп (м/га) по выделу; квантиль среди выделов всех ООЗТ заданного типа."""
     if data.trails is None:
         log.warning("  тропы не загружены — пропуск")
         return
-    target = data.vydels_of_type(*type_keys) if type_keys else data.oozt
+    q = p["quantile"]
+    target = _target(data, p)
     tu = unary_union(data.trails.geometry.values)
     dens = target.geometry.intersection(tu).length / target["area_ha"]
     dens = dens.replace([np.inf], np.nan).fillna(0)
     pos = dens[dens > 0]
     if pos.empty:
         return
-    thr = float(np.quantile(pos, QUANTILE))
+    thr = float(np.quantile(pos, q))
     sel = target[dens >= thr]
     for (_, r), d in zip(sel.iterrows(), dens[dens >= thr]):
-        res.add(r, measure, f"плотность троп {d:.0f} м/га ≥ Q75 = {thr:.0f} м/га", round(d, 1))
+        res.add(r, measure, f"плотность троп {d:.0f} м/га ≥ {_qtag(q)} = {thr:.0f} м/га", round(d, 1))
     trails_in = None
     if not sel.empty:
         # Красным показываем не целые исходные линии, а только их фрагменты
-        # внутри локальных пятен высокой плотности (Q75) и выбранных выделов.
-        hot_polys, _, _ = _trail_hotspots(data)
+        # внутри локальных пятен высокой плотности и выбранных выделов.
+        hot_polys, _, _ = _trail_hotspots(data, TRAIL_WINDOW_M, q)
         if hot_polys is not None and not hot_polys.empty:
             clip_geom = unary_union(hot_polys.geometry.values).intersection(
                 unary_union(sel.geometry.values)
@@ -1769,63 +2522,50 @@ def rule_trail_density_vydel(data: Data, res: Results, measure: dict, type_keys=
     log.info("  → %d %s (порог %.0f м/га)", len(sel), _units(), thr)
 
 
-def _trail_hotspots(data: Data):
-    """Кэш: маска верхнего квартиля плотности троп в окне TRAIL_WINDOW_M."""
-    if getattr(data, "_hot", None) is not None:
-        return data._hot
-    if data.trails is None:
-        data._hot = (None, None, None)
-        return data._hot
-    dens, tr = line_density(data.trails, data.bounds_pad, TRAIL_WINDOW_M, CELL)
-    inside = data.inside_mask(tr, dens.shape)
-    mask, thr = upper_quantile_mask(dens, inside)
-    polys = polygonize_mask(mask, tr)
-    log.info("  плотность троп: порог Q75 = %.0f м/га, %d пятен", thr, len(polys))
-    data._hot = (polys, thr, (dens, tr))
-    return data._hot
-
-
-def rule_trail_hotspot(data: Data, res: Results, measure: dict, type_keys=TYPE_FOREST):
-    polys, thr, _ = _trail_hotspots(data)
+def rule_trail_hotspot(data: Data, res: Results, measure: dict, p: dict):
+    polys, thr, _ = _trail_hotspots(data, p["window"], p["quantile"])
     if polys is None:
         log.warning("  тропы не загружены — пропуск")
         return
-    target = data.vydels_of_type(*type_keys) if type_keys else data.oozt
-    hit = _overlay_patches_to_vydels(data, polys, target)
+    target = _target(data, p)
+    hit = _overlay_patches_to_vydels(data, polys, target, p["min_ha"], spec_share(p))
     for _, h in hit.iterrows():
         r = data.oozt[data.oozt["uid"] == h["uid"]].iloc[0]
-        res.add(r, measure, f"участки повышенной плотности троп (окно {TRAIL_WINDOW_M:.0f} м, ≥Q75={thr:.0f} м/га): "
+        res.add(r, measure, f"участки повышенной плотности троп (окно {p['window']:.0f} м, "
+                            f"≥{_qtag(p['quantile'])}={thr:.0f} м/га): "
                             f"{h['patch_ha']:.2f} га ({100 * h['share']:.0f}% полигона)", round(h["patch_ha"], 2))
     if not hit.empty:
         sel = target[target["uid"].isin(hit["uid"])]
         pieces = polys[polys.intersects(unary_union(sel.geometry.values))]
         res.add_evidence(pieces, measure["name"],
-                         "зоны повышенной плотности троп (верхний квартиль)")
+                         "зоны повышенной плотности троп (верхний квартиль)" if abs(p["quantile"] - 0.75) < 1e-9
+                         else f"зоны повышенной плотности троп ({_qtag(p['quantile'])})")
     log.info("  → %d %s", len(hit), _units())
 
 
-def rule_shore_trails(data: Data, res: Results, measure: dict):
-    """Буфер вдоль водных объектов ∩ пятна повышенной плотности троп."""
-    polys, thr, _ = _trail_hotspots(data)
+def rule_shore_trails(data: Data, res: Results, measure: dict, p: dict):
+    """Полоса вдоль водных объектов ∩ пятна повышенной плотности троп."""
+    polys, thr, _ = _trail_hotspots(data, p["window"], p["quantile"])
     if polys is None or (data.hydro_lines is None and data.hydro_polys is None):
         log.warning("  нет троп или гидрологии — пропуск")
         return
+    dist = p["dist"]
     parts = [g.geometry for g in (data.hydro_lines, data.hydro_polys) if g is not None]
     water = unary_union(pd.concat(parts).values)
-    shore = water.buffer(SHORE_BUFFER_M).difference(water) if water.area > 0 else water.buffer(SHORE_BUFFER_M)
+    shore = water.buffer(dist).difference(water) if water.area > 0 else water.buffer(dist)
     hot_shore = polys[polys.intersects(shore)].copy()
     hot_shore["geometry"] = hot_shore.geometry.intersection(shore)
     hot_shore = hot_shore[~hot_shore.is_empty]
-    hit = _overlay_patches_to_vydels(data, hot_shore, data.oozt, min_ha=MIN_PATCH_HA / 5)
+    hit = _overlay_patches_to_vydels(data, hot_shore, _target(data, p), p["min_ha"], spec_share(p))
     for _, h in hit.iterrows():
         r = data.oozt[data.oozt["uid"] == h["uid"]].iloc[0]
-        res.add(r, measure, f"тропы повышенной плотности в {SHORE_BUFFER_M:.0f} м от водных объектов: "
+        res.add(r, measure, f"тропы повышенной плотности в {dist:.0f} м от водных объектов: "
                             f"{h['patch_ha']:.2f} га ({100 * h['share']:.0f}% полигона)", round(h["patch_ha"], 2))
     res.add_evidence(hot_shore, measure["name"],
-                     f"тропы на расстоянии {SHORE_BUFFER_M:.0f} м от водных объектов (Q75)")
+                     f"тропы на расстоянии {dist:.0f} м от водных объектов ({_qtag(p['quantile'])})")
     # сами водные объекты рядом с найденными участками — как контекст на схеме
     if not hot_shore.empty:
-        near = hot_shore.geometry.buffer(SHORE_BUFFER_M).union_all()
+        near = hot_shore.geometry.buffer(dist).union_all()
         if data.hydro_lines is not None:
             res.add_evidence(data.hydro_lines[data.hydro_lines.intersects(near)], measure["name"], "водные объекты (линии)")
         if data.hydro_polys is not None:
@@ -1833,10 +2573,53 @@ def rule_shore_trails(data: Data, res: Results, measure: dict):
     log.info("  → %d %s", len(hit), _units())
 
 
-def _species_group(data: Data, kind: str):
-    if kind == "invasive":
-        return data.inv_pts, data.inv_polys, data.cfg.invasive_rasters
-    return data.rare_pts, data.rare_polys, data.cfg.rare_rasters
+# ---- виды ----------------------------------------------------------------------------
+CATEGORY_LABEL = {"инвазивные": ("инвазивные виды", "инвазивных видов"),
+                  "охраняемые": ("охраняемые виды", "охраняемых видов"),
+                  "прочие": ("виды", "видов")}
+
+
+def _sp_label(p: dict, gen=False) -> str:
+    """Подпись выбранных видов для слоёв-обоснований: «инвазивные виды», «Corvus», «виды»."""
+    if p.get("taxon"):
+        return ", ".join(p["taxon"])
+    cats = p.get("category") or []
+    lab = CATEGORY_LABEL.get(cats[0], ("виды", "видов")) if len(cats) == 1 else ("виды", "видов")
+    return lab[1] if gen else lab[0]
+
+
+def _taxon_mask(species: pd.Series, taxa) -> np.ndarray:
+    pat = "|".join(rf"\b{re.escape(t)}\b" for t in taxa)
+    return species.astype(str).str.contains(pat, case=False, regex=True).values
+
+
+def select_species(data: Data, p: dict):
+    """Точки, полигоны и растры SDM, подходящие мероприятию (категория, группы, таксоны, тип данных)."""
+    def filt(g):
+        if g is None or g.empty:
+            return None
+        m = np.ones(len(g), dtype=bool)
+        if p.get("category"):
+            m &= g["category"].isin(p["category"]).values
+        if p.get("groups"):
+            m &= g["group"].map(lambda x: group_matches(x, p["groups"])).values.astype(bool)
+        if p.get("taxon"):
+            m &= _taxon_mask(g["species"], p["taxon"])
+        g = g[m]
+        return g if not g.empty else None
+    pts = filt(data.sp_points) if _uses(p, "points") else None
+    polys = filt(data.sp_polys) if _uses(p, "polygons") else None
+    rasters = []
+    if _uses(p, "sdm"):
+        for r in data.sp_rasters:
+            if p.get("category") and r["category"] not in p["category"]:
+                continue
+            if not group_matches(r["group"], p.get("groups")):
+                continue
+            if p.get("taxon") and not _taxon_mask(pd.Series([r["species"]]), p["taxon"])[0]:
+                continue
+            rasters.append(r["path"])
+    return pts, polys, rasters
 
 
 def _sdm_patches(data: Data, raster_paths, thr=SDM_THRESHOLD):
@@ -1860,66 +2643,77 @@ def _sdm_patches(data: Data, raster_paths, thr=SDM_THRESHOLD):
     return gpd.GeoDataFrame(pd.concat(out, ignore_index=True), crs=WORK_EPSG)
 
 
-def rule_invasive(data: Data, res: Results, measure: dict):
-    pts, polys, rasters = _species_group(data, "invasive")
-    # точки
-    if pts is not None and not pts.empty:
-        j = gpd.sjoin(pts, data.oozt[["uid", "geometry"]], how="inner", predicate="within")
+def _sdm_monitoring(data: Data, res: Results, measure: dict, p: dict, rasters, label: str):
+    """Модели SDM: отдельная строка «… — мониторинг (SDM ≥ порог)» по участкам ≥ порога."""
+    thr = p["sdm"]
+    sdm = _sdm_patches(data, rasters, thr=thr)
+    if sdm is None or sdm.empty:
+        return
+    m2 = dict(measure)
+    m2["name"] = measure["name"] + " — мониторинг (SDM ≥ %.2f)" % thr
+    target = _target(data, p)
+    j = gpd.overlay(sdm, target[["uid", "area_ha", "geometry"]], how="intersection")
+    j["ha"] = j.area / 1e4
+    share = spec_share(p)
+    for uid, grp in j.groupby("uid"):
+        tot = grp.groupby("species")["ha"].sum()
+        tot = tot[tot >= p["min_ha"]]
+        if tot.empty:
+            continue
+        r = data.oozt[data.oozt["uid"] == uid].iloc[0]
+        if 100 * tot.sum() / max(r["area_ha"], 1e-9) < share:
+            continue
+        res.add(r, m2, f"вероятность SDM ≥ {_fmt(thr)}: " + ", ".join(f"{s} ({a:.2f} га)" for s, a in tot.items()),
+                round(float(tot.sum()), 2))
+    res.add_evidence(j, m2["name"], f"{label} — SDM (≥ {thr:.2f})", "species")
+
+
+def rule_species(data: Data, res: Results, measure: dict, p: dict):
+    """Находки видов: полигоны с точками / пересекающиеся с полигонами находок; SDM — мониторинг."""
+    pts, polys, rasters = select_species(data, p)
+    lab = _sp_label(p)
+    target = _target(data, p)
+    if pts is not None:
+        j = gpd.sjoin(pts, target[["uid", "geometry"]], how="inner", predicate="within")
         for uid, grp in j.groupby("uid"):
             r = data.oozt[data.oozt["uid"] == uid].iloc[0]
             sp = grp.groupby("species").size().sort_values(ascending=False)
             coords = []
-            for s, g in grp.groupby("species"):
+            for s_, g in grp.groupby("species"):
                 gg = gpd.GeoSeries(g.geometry, crs=WORK_EPSG).to_crs(4326)
-                coords.append(f"{s} ({gg.x.mean():.6f}° в.д., {gg.y.mean():.6f}° с.ш.)")
-            res.add(r, measure, f"точечное удаление: {', '.join(f'{k} ({v})' for k, v in sp.items())}; "
+                coords.append(f"{s_} ({gg.x.mean():.6f}° в.д., {gg.y.mean():.6f}° с.ш.)")
+            res.add(r, measure, f"точечные находки: {', '.join(f'{k} ({v})' for k, v in sp.items())}; "
                                 f"координаты WGS 84: {'; '.join(coords)}", int(len(grp)))
-        res.add_evidence(j, measure["name"], "инвазионные виды — точки", "species")
+        res.add_evidence(j, measure["name"], f"{lab} — точки", "species")
         log.info("  точки: %d %s", j["uid"].nunique(), _units())
-    # полигоны
-    if polys is not None and not polys.empty:
-        j = gpd.overlay(polys, data.oozt[["uid", "geometry"]], how="intersection")
+    if polys is not None:
+        j = gpd.overlay(polys, target[["uid", "geometry"]], how="intersection")
         j["ha"] = j.area / 1e4
         for uid, grp in j.groupby("uid"):
             r = data.oozt[data.oozt["uid"] == uid].iloc[0]
-            txt = ", ".join(f"{s} ({a:.2f} га)" for s, a in grp.groupby("species")["ha"].sum().items())
-            res.add(r, measure, f"удаление в пределах полигонов произрастания: {txt}", round(grp["ha"].sum(), 2))
-        res.add_evidence(j, measure["name"], "инвазионные виды — полигоны", "species")
-    # растры
-    sdm = _sdm_patches(data, rasters, thr=SDM_THRESHOLD_INVASIVE)
-    if sdm is not None and not sdm.empty:
-        m2 = dict(measure)
-        m2["name"] = measure["name"] + " — мониторинг (SDM ≥ %.2f)" % SDM_THRESHOLD_INVASIVE
-        j = gpd.overlay(sdm, data.oozt[["uid", "area_ha", "geometry"]], how="intersection")
-        j["ha"] = j.area / 1e4
-        for uid, grp in j.groupby("uid"):
-            tot = grp.groupby("species")["ha"].sum()
-            tot = tot[tot >= MIN_PATCH_HA]
-            if tot.empty:
-                continue
-            r = data.oozt[data.oozt["uid"] == uid].iloc[0]
-            if 100 * tot.sum() / max(r["area_ha"], 1e-9) < _min_share(data):
-                continue
-            txt = ", ".join(f"{s} ({a:.2f} га)" for s, a in tot.items())
-            res.add(r, m2, f"вероятность SDM ≥ {SDM_THRESHOLD_INVASIVE}: {txt}", round(float(tot.sum()), 2))
-        res.add_evidence(j, m2["name"],
-                         f"инвазионные виды — SDM (≥ {SDM_THRESHOLD_INVASIVE:.2f})", "species")
+            txt = ", ".join(f"{s_} ({a:.2f} га)" for s_, a in grp.groupby("species")["ha"].sum().items())
+            res.add(r, measure, f"в пределах полигонов находок: {txt}", round(grp["ha"].sum(), 2))
+        res.add_evidence(j, measure["name"], f"{lab} — полигоны", "species")
+        log.info("  полигоны: %d %s", j["uid"].nunique(), _units())
+    _sdm_monitoring(data, res, measure, p, rasters, lab)
 
 
-def rule_rare_trails(data: Data, res: Results, measure: dict):
-    """Ликвидация троп (ограничения) в 50 м от точек редких видов / в полигонах / в SDM ≥ порога для редких видов (мониторинг)."""
-    pts, polys, rasters = _species_group(data, "rare")
+def rule_species_trails(data: Data, res: Results, measure: dict, p: dict):
+    """Тропы в заданном расстоянии от точек и внутри полигонов видов; SDM — мониторинг."""
+    pts, polys, rasters = select_species(data, p)
+    lab, lab_gen, dist = _sp_label(p), _sp_label(p, gen=True), p["dist"]
     trails = data.trails
+    target = _target(data, p)
     zones = []
-    if pts is not None and not pts.empty:
+    if pts is not None:
         b = pts.copy()
-        b["geometry"] = b.geometry.buffer(RARE_BUFFER_M)
-        b["src"] = "точки (буфер %d м)" % RARE_BUFFER_M
+        b["geometry"] = b.geometry.buffer(dist)
+        b["src"] = "точки (буфер %d м)" % dist
         zones.append(b)
-    if polys is not None and not polys.empty:
-        p = polys.copy()
-        p["src"] = "полигоны"
-        zones.append(p)
+    if polys is not None:
+        q_ = polys.copy()
+        q_["src"] = "полигоны"
+        zones.append(q_)
     if zones:
         z = gpd.GeoDataFrame(pd.concat(zones, ignore_index=True), crs=WORK_EPSG)
         if trails is not None:
@@ -1928,54 +2722,36 @@ def rule_rare_trails(data: Data, res: Results, measure: dict):
             t["geometry"] = t.geometry.intersection(zu)
             t = t[~t.is_empty]
             if not t.empty:
-                j = gpd.overlay(t.explode(index_parts=False), data.oozt[["uid", "geometry"]], how="intersection",
+                j = gpd.overlay(t.explode(index_parts=False), target[["uid", "geometry"]], how="intersection",
                                 keep_geom_type=False)
                 j = j[j.geom_type.isin(["LineString", "MultiLineString"])]
                 j["len"] = j.length
                 for uid, grp in j.groupby("uid"):
                     r = data.oozt[data.oozt["uid"] == uid].iloc[0]
-                    # какие виды
                     zz = z[z.intersects(r.geometry)]
                     sp = ", ".join(sorted(zz["species"].unique())[:8])
-                    res.add(r, measure, f"тропы в зоне редких видов ({sp}): {grp['len'].sum():.0f} м",
+                    res.add(r, measure, f"тропы в зоне {lab_gen} ({sp}): {grp['len'].sum():.0f} м",
                             round(grp["len"].sum()))
-                res.add_evidence(j, measure["name"],
-                                 f"тропы на расстоянии {RARE_BUFFER_M:.0f} м от редких видов")
-                log.info("  тропы на расстоянии %.0f м от редких видов: %d %s",
-                         RARE_BUFFER_M, j["uid"].nunique(), _units())
+                res.add_evidence(j, measure["name"], f"тропы на расстоянии {dist:.0f} м от {lab_gen}")
+                log.info("  тропы на расстоянии %.0f м от %s: %d %s", dist, lab_gen, j["uid"].nunique(), _units())
             res.add_evidence(pts[pts.intersects(data.union)] if pts is not None else None,
-                             measure["name"], "редкие виды — точки", "species")
-            res.add_evidence(polys, measure["name"], "редкие виды — полигоны", "species")
+                             measure["name"], f"{lab} — точки", "species")
+            res.add_evidence(polys, measure["name"], f"{lab} — полигоны", "species")
         else:
             # без троп — назначаем по самим зонам
-            j = gpd.overlay(z, data.oozt[["uid", "geometry"]], how="intersection")
+            j = gpd.overlay(z, target[["uid", "geometry"]], how="intersection")
             for uid, grp in j.groupby("uid"):
                 r = data.oozt[data.oozt["uid"] == uid].iloc[0]
-                res.add(r, measure, "местообитания редких видов: " + ", ".join(sorted(grp["species"].unique())[:8]))
-            res.add_evidence(j, measure["name"], "редкие виды", "species")
-    sdm = _sdm_patches(data, rasters, thr=SDM_THRESHOLD_RARE)
-    if sdm is not None and not sdm.empty:
-        m2 = dict(measure)
-        m2["name"] = measure["name"] + " — мониторинг (SDM ≥ %.2f)" % SDM_THRESHOLD_RARE
-        j = gpd.overlay(sdm, data.oozt[["uid", "geometry"]], how="intersection")
-        j["ha"] = j.area / 1e4
-        for uid, grp in j.groupby("uid"):
-            tot = grp.groupby("species")["ha"].sum()
-            tot = tot[tot >= MIN_PATCH_HA]
-            if tot.empty:
-                continue
-            r = data.oozt[data.oozt["uid"] == uid].iloc[0]
-            if 100 * tot.sum() / max(r["area_ha"], 1e-9) < _min_share(data):
-                continue
-            res.add(r, m2, "вероятность SDM ≥ %.2f: " % SDM_THRESHOLD_RARE +
-                    ", ".join(f"{s} ({a:.2f} га)" for s, a in tot.items()), round(float(tot.sum()), 2))
-        res.add_evidence(j, m2["name"], "редкие виды — SDM", "species")
+                res.add(r, measure, f"местообитания {lab_gen}: " + ", ".join(sorted(grp["species"].unique())[:8]))
+            res.add_evidence(j, measure["name"], lab, "species")
+    _sdm_monitoring(data, res, measure, p, rasters, lab)
 
 
-def rule_slope(data: Data, res: Results, measure: dict, threshold_pct: float, type_keys=None):
+def rule_slope(data: Data, res: Results, measure: dict, p: dict):
     if data.dem is None:
         log.warning("  ЦМР не загружена — пропуск")
         return
+    threshold_pct = p["slope"]
     arr, tr = data.dem
     if getattr(data, "_slope", None) is None:
         data._slope = slope_percent(arr, CELL)
@@ -1985,76 +2761,74 @@ def rule_slope(data: Data, res: Results, measure: dict, threshold_pct: float, ty
     # убираем одиночные ячейки
     mask = ndimage.binary_opening(mask, structure=np.ones((2, 2)))
     polys = polygonize_mask(mask, tr)
-    target = data.vydels_of_type(*type_keys) if type_keys else data.oozt
-    hit = _overlay_patches_to_vydels(data, polys, target)
+    target = _target(data, p)
+    hit = _overlay_patches_to_vydels(data, polys, target, p["min_ha"], spec_share(p))
+    eco_label = _eco_label(p)
     for _, h in hit.iterrows():
         r = data.oozt[data.oozt["uid"] == h["uid"]].iloc[0]
-        eco_label = "в луговых экосистемах" if type_keys else "в любых экосистемах"
         res.add(r, measure, f"уклон более {threshold_pct:g}% {eco_label}: "
                            f"{h['patch_ha']:.2f} га ({h['share'] * 100:.0f} % {_unit_word()})",
                 round(h["patch_ha"], 2))
     if not hit.empty:
         sel = target[target["uid"].isin(hit["uid"])]
         pieces = polys[polys.intersects(unary_union(sel.geometry.values))]
-        eco_label = "в луговых экосистемах" if type_keys else "в любых экосистемах"
         res.add_evidence(pieces, measure["name"], f"уклон более {threshold_pct:g}% {eco_label}")
     log.info("  → %d %s (%d пятен)", len(hit), _units(), len(polys))
 
 
-def rule_corvus(data: Data, res: Results, measure: dict, genus="Corvus", type_keys=TYPE_FOREST):
-    pts = data.fauna_pts
+def rule_species_density(data: Data, res: Results, measure: dict, p: dict):
+    """Плотность точек выбранных видов (например, рода Corvus) в окне; участки ≥ квантиля."""
+    pts, _, _ = select_species(data, dict(p, sources=["points"]))
+    lab = _sp_label(p)
     if pts is None or pts.empty:
-        log.warning("  точки фауны не загружены — пропуск")
+        log.warning("  точки видов (%s) не найдены — пропуск", _sel_txt(p))
         return
-    c = pts[pts["species"].str.contains(rf"\b{genus}\b", case=False, regex=True)]
-    if c.empty:
-        log.warning("  точки рода %s не найдены", genus)
-        return
-    dens, tr = point_density(c, data.bounds_pad, CORVUS_WINDOW_M, CELL)
+    w, q = p["window"], p["quantile"]
+    dens, tr = point_density(pts, data.bounds_pad, w, CELL)
     inside = data.inside_mask(tr, dens.shape)
-    mask, thr = upper_quantile_mask(dens, inside)
+    mask, thr = upper_quantile_mask(dens, inside, q)
     polys = polygonize_mask(mask, tr)
-    target = data.vydels_of_type(*type_keys) if type_keys else data.oozt
-    hit = _overlay_patches_to_vydels(data, polys, target)
+    target = _target(data, p)
+    hit = _overlay_patches_to_vydels(data, polys, target, p["min_ha"], spec_share(p))
     for _, h in hit.iterrows():
         r = data.oozt[data.oozt["uid"] == h["uid"]].iloc[0]
-        res.add(r, measure, f"плотность {genus} (окно {CORVUS_WINDOW_M:.0f} м) ≥ Q75 = {thr:.3f} шт/га: "
+        res.add(r, measure, f"плотность {lab} (окно {w:.0f} м) ≥ {_qtag(q)} = {thr:.3f} шт/га: "
                             f"{h['patch_ha']:.2f} га ({100 * h['share']:.0f}% полигона)", round(h["patch_ha"], 2))
-    res.add_evidence(polys[polys.intersects(data.union)], measure["name"], f"плотность {genus} (Q75)")
-    res.add_evidence(c[c.intersects(data.union.buffer(CORVUS_WINDOW_M))], measure["name"], f"{genus} — точки", "species")
-    log.info("  → %d %s (%d точек %s)", len(hit), _units(), len(c), genus)
+    res.add_evidence(polys[polys.intersects(data.union)], measure["name"], f"плотность {lab} ({_qtag(q)})")
+    res.add_evidence(pts[pts.intersects(data.union.buffer(w))], measure["name"], f"{lab} — точки", "species")
+    log.info("  → %d %s (%d точек: %s)", len(hit), _units(), len(pts), lab)
 
 
-# --- сопоставление текста «Метод выявления» с правилом -------------------------------
+RULE_FUNCS = {
+    "type": rule_type, "trail_density": rule_trail_density_vydel, "trail_hotspot": rule_trail_hotspot,
+    "shore": rule_shore_trails, "slope": rule_slope, "species": rule_species,
+    "species_trails": rule_species_trails, "species_density": rule_species_density,
+}
+
+
 def dispatch_rule(measure: dict, data: Data, res: Results) -> bool:
-    c = classify_measure(measure)
-    if c["rule"] is None:
-        if c["reason"] == "метод не распознан":
-            log.warning("  %s: метод не распознан: «%s» — пропуск", measure["name"], measure.get("method"))
+    spec = measure_spec(measure)
+    if spec["rule"] is None:
+        if spec["reason"] not in ("метод выявления не задан", "по таблице: нет данных"):
+            log.warning("  %s: %s — пропуск", measure["name"], spec["reason"])
         return False
     log.info("Мероприятие: %s%s", (measure.get("code") + " ") if measure.get("code") else "", measure["name"])
     st = measure_status(measure, data.cfg)
     if st["state"] == "missing":
         log.warning("  %s — пропуск", st["text"])
         return False
-    rule, pr = c["rule"], c["params"]
-    if rule == "corvus":
-        rule_corvus(data, res, measure)
-    elif rule == "slope":
-        rule_slope(data, res, measure, pr["threshold_pct"], pr["type_keys"])
-    elif rule == "invasive":
-        rule_invasive(data, res, measure)
-    elif rule == "rare":
-        rule_rare_trails(data, res, measure)
-    elif rule == "shore":
-        rule_shore_trails(data, res, measure)
-    elif rule == "trail_hotspot":
-        rule_trail_hotspot(data, res, measure)
-    elif rule == "trail_density":
-        rule_trail_density_vydel(data, res, measure)
-    elif rule == "type":
-        rule_type(data, res, measure, pr["keys"], pr["label"])
+    RULE_FUNCS[spec["rule"]](data, res, measure, spec["p"])
     return True
+
+
+def spec_pad_m(measures) -> float:
+    """Запас вокруг ООЗТ для расчётов: наибольшее окно или расстояние среди включённых мероприятий."""
+    v = 0.0
+    for m in measures or []:
+        if m.get("on"):
+            p = measure_spec(m).get("p", {})
+            v = max([v] + [float(p[k]) for k in ("window", "dist") if p.get(k)])
+    return v
 
 
 # =====================================================================================
@@ -2079,8 +2853,15 @@ def read_measures(path: str) -> list[dict]:
     code_re = re.compile(r"^[IVX]+\.\d+$")
     c_code = next((c for c in df.columns
                    if df[c].dropna().astype(str).str.strip().str.match(code_re).mean() > 0.6), None)
+    spec_cols = {}
+    for key, title, stem, _ in SPEC_COLUMNS:
+        c = next((c for c in df.columns if re.sub(r"\s+", " ", c.lower().replace("ё", "е")).startswith(stem)), None)
+        if c is not None:
+            spec_cols[key] = c
+    if spec_cols:
+        log.info("Столбцы правил в таблице: %s", ", ".join(spec_cols.values()))
     out = []
-    for _, r in df.iterrows():
+    for i, r in df.iterrows():
         if pd.isna(r[c_name]):
             continue
         on = str(r[c_on]).strip().lower() in ("1", "1.0", "true", "да", "yes", "вкл")
@@ -2093,9 +2874,162 @@ def read_measures(path: str) -> list[dict]:
             "eco": str(r[c_eco]).strip() if c_eco and not pd.isna(r[c_eco]) else "",
             "prikaz": str(r[c_prikaz]).strip() if c_prikaz and not pd.isna(r[c_prikaz]) else "",
             "season": str(r[c_season]).strip() if c_season and not pd.isna(r[c_season]) else "",
+            "spec": {k: (None if pd.isna(r[c]) else r[c]) for k, c in spec_cols.items()},
+            "row": int(i) + 2,                 # номер строки в Excel (для записи описаний)
         })
     log.info("Таблица мероприятий: %d строк, включено %d", len(out), sum(m["on"] for m in out))
     return out
+
+
+def _cell_value(key: str, v):
+    """Параметр правила → значение ячейки Excel."""
+    if key == "types":
+        return v[1] if v else "любые"
+    if key in ("category", "groups"):
+        return ", ".join(v) if v else "любые"
+    if key == "sources":
+        return ", ".join({"points": "точки", "polygons": "полигоны", "sdm": "SDM"}[x] for x in v) if v else "любые"
+    if key == "taxon":
+        return ", ".join(v) if v else None
+    return None if v is None else float(v)
+
+
+def update_measures_xlsx(path: str, cfg: Config | None = None, fill_from_method: bool = True,
+                         backup: bool = True) -> str:
+    """Дополняет таблицу мероприятий: столбцы правил (заполняются из текста метода там, где правило не задано),
+    выпадающие списки, лист «Справка по правилам», столбец с полным описанием расчёта. Возвращает сводку."""
+    import shutil
+    import openpyxl
+    from copy import copy as _cp
+    from openpyxl.styles import Alignment, Font, PatternFill
+    from openpyxl.utils import get_column_letter
+    from openpyxl.worksheet.datavalidation import DataValidation
+    if cfg is not None:
+        _MIN_SHARE[0] = float(getattr(cfg, "min_share_pct", 0) or 0)
+    path = str(path)
+    measures = read_measures(path)
+    if backup:
+        bak = Path(path).with_name(Path(path).stem + "_до_правил" + Path(path).suffix)
+        if not bak.exists():
+            shutil.copy2(path, bak)
+    wb = openpyxl.load_workbook(path)
+    ws = wb.worksheets[0]
+    norm = lambda v: re.sub(r"\s+", " ", str(v or "").strip().lower().replace("ё", "е"))
+    hdr = {c: norm(ws.cell(1, c).value) for c in range(1, ws.max_column + 1)}
+    last = max([c for c, h in hdr.items() if h] or [1])
+    proto = ws.cell(1, last)
+
+    def ensure(title, stem, width):
+        nonlocal last
+        c = next((c for c, h in hdr.items() if h.startswith(stem)), None)
+        if c is None:
+            last += 1
+            c = last
+            cell = ws.cell(1, c, title)
+            cell.font, cell.border = _cp(proto.font), _cp(proto.border)
+            cell.fill = PatternFill("solid", fgColor="E8F0E0")
+            cell.alignment = Alignment(wrap_text=True, vertical="center", horizontal="center")
+            hdr[c] = norm(title)
+            ws.column_dimensions[get_column_letter(c)].width = width
+        return c
+
+    widths = dict(rule=24, types=16, category=14, groups=18, taxon=14, sources=14)
+    cols = {k: ensure(t, stem, widths.get(k, 11)) for k, t, stem, _ in SPEC_COLUMNS}
+    c_desc = ensure(DESC_COLUMN, "процедура назначения", 95)
+    n_fill = n_desc = 0
+    wrap = Alignment(wrap_text=True, vertical="top")
+    for m in measures:
+        r = m["row"]
+        spec = measure_spec(m)
+        if fill_from_method and m["on"] and spec["rule"] and spec["origin"] == "текст метода":
+            ws.cell(r, cols["rule"], RULES[spec["rule"]]["title"])
+            for k, v in spec["p"].items():
+                val = _cell_value(k, v)
+                if val is not None and k != "min_share":
+                    ws.cell(r, cols[k], val)
+            m = dict(m, spec={k: ws.cell(r, c).value for k, c in cols.items()})
+            spec = measure_spec(m)
+            n_fill += 1
+        for k, c in cols.items():
+            ws.cell(r, c).alignment = wrap
+        if spec["rule"] or m["on"]:
+            txt = describe_spec(spec, full=True)
+            ws.cell(r, c_desc, txt).alignment = wrap
+            n_desc += 1
+            need = (len(txt) // int(95 * 1.15) + 2) * 15
+            if (ws.row_dimensions[r].height or 15) < need:
+                ws.row_dimensions[r].height = need
+    # выпадающие списки (подсказки: можно ввести и своё значение / несколько через запятую)
+    ours = set(cols.values())
+    ws.data_validations.dataValidation = [
+        dv for dv in ws.data_validations.dataValidation
+        if not any(rng.min_col in ours for rng in dv.sqref.ranges)]
+    nrow = max(ws.max_row, 2)
+    lists = {"rule": RULE_TITLES, "types": ["лесные", "луговые", "водные", "околоводные", "болотные",
+                                             "водные, околоводные, болотные", "любые"],
+             "category": SPECIES_CATEGORIES + ["любые"], "groups": SPECIES_GROUPS[:-1] + ["любые"],
+             "sources": ["точки", "полигоны", "SDM", "точки, полигоны", "любые"]}
+    for k, vals in lists.items():
+        f = '"' + ",".join(v.replace(", ", "; ") for v in vals) + '"'
+        dv = DataValidation(type="list", formula1=f, allow_blank=True, showErrorMessage=(k == "rule"),
+                            errorTitle="Правило назначения",
+                            error="Выберите правило из списка (см. лист «Справка по правилам»).")
+        dv.add(f"{get_column_letter(cols[k])}2:{get_column_letter(cols[k])}{nrow}")
+        ws.add_data_validation(dv)
+    # лист-справка
+    if "Справка по правилам" in wb.sheetnames:
+        del wb["Справка по правилам"]
+    h = wb.create_sheet("Справка по правилам")
+    bold = Font(bold=True)
+    rows = [("Как скрипт читает способ назначения мероприятия", None, None, None), (None,) * 4,
+            ("Строка таблицы рассчитывается, если «Вкл/выкл» = 1. Правило берётся из столбца «Правило назначения»; "
+             "параметры — из столбцов справа. Пустой параметр — значение по умолчанию (указано ниже). Если "
+             "«Правило назначения» пусто, правило и параметры определяются по ключевым словам «Метода выявления» "
+             "(как в прежних версиях). Столбец «" + DESC_COLUMN + "» заполняется скриптом и только описывает расчёт.",
+             None, None, None), (None,) * 4,
+            ("Правило назначения", "Что делает", "Нужные данные", "Параметры (по умолчанию)")]
+    data_t = {"trails": "тропы", "hydro": "гидрография", "dem": "ЦМР", "species": "слои видов"}
+    for k, v in RULES.items():
+        ps = []
+        for pk, d in v["params"].items():
+            dv_ = ("обязательно" if d == REQ else "общий порог из окна скрипта" if d == SHARED else
+                   "любые" if d is None else _fmt(d))
+            ps.append(f"{SPEC_TITLE[pk]}: {dv_}")
+        rows.append((v["title"], v["help"],
+                     ", ".join(data_t[d] for d in v["data"]) + (" (+ тропы, если есть)" if v["opt"] else "")
+                     or "только слой территории", "; ".join(ps)))
+    rows += [(None,) * 4, ("Столбец", "Что указывать", None, None)]
+    rows += [(t, help_, None, None) for _, t, _, help_ in SPEC_COLUMNS]
+    rows += [(None,) * 4, ("Слои видов (задаются в окне скрипта)", "Значения", None, None),
+             ("Категория", "; ".join(f"{k} — {v}" for k, v in SPECIES_CATEGORY_HELP.items()), None, None),
+             ("Группа организмов", ", ".join(SPECIES_GROUPS[:-1]) + "; можно ввести новую группу", None, None),
+             ("Тип данных", "точки, полигоны — векторные слои (поле с латинскими названиями находится само); "
+                            "SDM — растр вероятности 0–1, название вида = имя файла", None, None)]
+    for row in rows:
+        h.append(list(row))
+    for rr in h.iter_rows():
+        for cell in rr:
+            cell.alignment = wrap
+    for rr in (1, 5):
+        for cell in h[rr]:
+            cell.font = bold
+    for rr in range(1, h.max_row + 1):
+        if h.cell(rr, 1).value in ("Столбец", "Слои видов (задаются в окне скрипта)"):
+            for cell in h[rr]:
+                cell.font = bold
+    h["A1"].font = Font(bold=True, size=13)
+    h["A1"].alignment = Alignment(wrap_text=False)
+    h.page_setup.orientation = "landscape"
+    h.sheet_properties.pageSetUpPr.fitToPage = True
+    h.page_setup.fitToWidth, h.page_setup.fitToHeight = 1, 0
+    h.freeze_panes = "A6"
+    for col, w in zip("ABCD", (30, 70, 26, 60)):
+        h.column_dimensions[col].width = w
+    h.merge_cells("A3:D3")
+    h.row_dimensions[3].height = 60
+    wb.save(path)
+    return (f"Таблица обновлена: {Path(path).name}. Правила записаны в {n_fill} строк(и), описания — в {n_desc}; "
+            f"добавлен лист «Справка по правилам».")
 
 
 # =====================================================================================
@@ -2138,7 +3072,28 @@ def _slope_style(layer):
     if layer.startswith("уклон"):
         # 50% и 70% чёрного соответственно.
         return ("#808080" if "5%" in layer else "#4D4D4D", "slope")
-    return LAYER_STYLE.get(layer, ("#17becf", "poly"))
+    if layer in LAYER_STYLE:
+        return LAYER_STYLE[layer]
+    return _pattern_style(layer)
+
+
+def _pattern_style(layer: str):
+    """Стиль слоёв-обоснований, подписи которых зависят от параметров мероприятия."""
+    t = str(layer).lower()
+    inv = "инваз" in t
+    if t.startswith("тропы на расстоянии"):
+        return ("#1f77b4", "poly") if "водн" in t else ("#9467bd", "line")
+    if "— sdm" in t:
+        return ("#f7b6d2" if inv else "#98df8a", "poly")
+    if t.startswith("плотность"):
+        return ("#7f7f7f", "poly")
+    if t.startswith("зоны повышенной плотности троп"):
+        return ("#ff7f0e", "poly")
+    if "— точки" in t:
+        return ("#e377c2" if inv else "#2ca02c" if ("охран" in t or "редк" in t) else "#000000", "point")
+    if "— полигоны" in t or "виды" in t or "видов" in t:
+        return ("#e377c2" if inv else "#2ca02c", "poly")
+    return ("#17becf", "poly")
 
 
 _BASEMAP_PROVIDER: list = []
@@ -2499,11 +3454,9 @@ def _fig_name(oozt, kv) -> str:
 
 
 def _params_line() -> str:
-    return ("Параметры: окно плотности троп %.0f м, окно плотности врановых %.0f м, буфер от точек редких видов "
-            "%.0f м, порог SDM %.2f (инвазионные) / %.2f (редкие), верхний квартиль — по всем ООЗТ; "
-            "мероприятия по участкам (тропы, уклон, врановые, SDM) — участок не меньше %g%% площади полигона."
-            % (TRAIL_WINDOW_M, CORVUS_WINDOW_M, RARE_BUFFER_M, SDM_THRESHOLD_INVASIVE, SDM_THRESHOLD_RARE,
-               _MIN_SHARE[0]))
+    return ("Параметры каждого мероприятия (правило, расстояния, окна, квантили, пороги) заданы в таблице "
+            "мероприятий и перечислены в разделе «Как рассчитаны мероприятия»; верхний квартиль считается по всем "
+            "ООЗТ; общий порог доли полигона — %g%% (если в таблице не указан свой)." % _MIN_SHARE[0])
 
 
 def _summary_table(table: pd.DataFrame, L: dict) -> pd.DataFrame:
@@ -2537,6 +3490,8 @@ def rules_table(measures, table: pd.DataFrame, cfg: Config) -> pd.DataFrame:
             "Пункт Приказа": m.get("prikaz", ""),
             "Тип экосистемы (по таблице)": m.get("eco", ""),
             "Метод выявления (из таблицы)": m.get("method") or "",
+            "Правило": (RULES[st["rule"]]["title"] if st["rule"] else "—") + (
+                " (по тексту метода)" if st["spec"].get("origin") == "текст метода" and st["rule"] else ""),
             "Как рассчитано скриптом": describe_rule(m),
             "Назначено полигонов": f"{n}{note}" if st["state"] != "missing" else f"0 ({st['text']})",
         })
@@ -2608,14 +3563,15 @@ def _report_blocks(data: Data, table: pd.DataFrame, evidence, rep: Path, kv_all:
               ("table", hdr, [[s(r[c]) for c in hdr] for _, r in summ.iterrows()], [5.0, 15.7, 3.0, 3.0], 9)]
     rt = rules_table(getattr(data, "measures", None), table, cfg)
     if not rt.empty:
-        hdr2 = ["Код", "Мероприятие", "Метод выявления (из таблицы)", "Как рассчитано скриптом",
+        hdr2 = ["Код", "Мероприятие", "Метод выявления (из таблицы)", "Правило", "Как рассчитано скриптом",
                 "Назначено полигонов"]
         B += [("h", 1, "Как рассчитаны мероприятия"),
-              ("p", "Для каждого включённого мероприятия указан метод выявления из таблицы мероприятий и правило, "
-                    "по которому скрипт его рассчитал. По этой таблице можно проверить, что название мероприятия "
-                    "и основание назначения соответствуют друг другу."),
+              ("p", "Для каждого включённого мероприятия указаны метод выявления из таблицы мероприятий, "
+                    "правило назначения с параметрами (из столбцов «Правило назначения», «Типы полигонов», "
+                    "«Виды: …», «Расстояние, м» и др.; если правило не задано — по тексту метода) и число "
+                    "полигонов, которым назначено мероприятие."),
               ("table", hdr2, [[s(r[c]) for c in hdr2] for _, r in rt.iterrows()],
-               [1.3, 5.2, 7.4, 7.4, 2.4], 8)]
+               [1.3, 4.6, 5.0, 2.8, 7.6, 2.4], 8)]
     report_table = table.rename(columns=_report_rename(cfg))
     group_cols = ["Тип мероприятий", "Тип экосистемы", "Соответствие Пункту Приказа"]
     cols = [L["unit"], L["unit_name"], "Мероприятия", "Основание"]
@@ -3475,7 +4431,7 @@ def run(cfg: Config):
     _setup_logging(out)
     _MIN_SHARE[0] = float(getattr(cfg, "min_share_pct", 0) or 0)
     measures = read_measures(cfg.measures_xlsx)
-    data = Data(cfg)
+    data = Data(cfg, pad_m=spec_pad_m(measures))
     data.measures = measures
     cfg.save(out / "config_used.json")
     res = Results()
@@ -3484,7 +4440,13 @@ def run(cfg: Config):
         stt = measure_status(m, cfg)
         log.info("  %-6s %-60s %s", m.get("code", ""), m["name"][:60], stt["text"])
         if m.get("on"):
+            sp_ = stt["spec"]
+            if sp_["rule"]:
+                log.info("         правило: %s (%s)", RULES[sp_["rule"]]["title"],
+                         "из столбцов таблицы" if sp_["origin"] == "таблица" else "по тексту «Метода выявления»")
             log.info("         как рассчитывается: %s", describe_rule(m))
+            for k in stt.get("layers") or []:
+                log.info("         слой видов: %s", species_layer_label(k))
     for m in measures:
         if not m["on"]:
             continue
@@ -3510,7 +4472,7 @@ def run(cfg: Config):
                 from openpyxl.styles import Alignment as _Al2, Font as _Ft2
                 wr = xw.book["правила"]
                 wr.freeze_panes = "A2"
-                for i, w in enumerate([8, 40, 10, 18, 60, 60, 22], 1):
+                for i, w in enumerate([8, 40, 10, 18, 50, 24, 60, 22], 1):
                     wr.column_dimensions[chr(64 + i)].width = w
                 for cell in wr[1]:
                     cell.font = _Ft2(bold=True)
@@ -3695,9 +4657,15 @@ def main():
     ap.add_argument("--no-split", action="store_true",
                     help="не делить многочастные объекты слоя территории на отдельные контуры")
     ap.add_argument("--save-config-only", action="store_true", help="только собрать конфиг диалогами и сохранить")
+    ap.add_argument("--update-table", metavar="XLSX",
+                    help="записать в таблицу мероприятий столбцы правил, справку и описания расчёта и выйти")
     ap.add_argument("--report-only", action="store_true",
                     help="не пересчитывать: построить отчёт по measures_long.csv и evidence.gpkg из out_dir")
     args = ap.parse_args()
+    if args.update_table:
+        logging.basicConfig(level=logging.INFO, format="%(message)s")
+        print(update_measures_xlsx(args.update_table, Config.load(args.config) if args.config else None))
+        return
 
     if args.config and not args.gui:
         cfg = Config.load(args.config)
