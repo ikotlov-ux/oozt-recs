@@ -28,6 +28,8 @@ out/
 RECs*/
 report/
 *.xlsx
+!measures/
+!measures/*.xlsx
 *.csv
 *.pdf
 *.pptx
