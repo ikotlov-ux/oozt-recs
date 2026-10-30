@@ -5,8 +5,12 @@ oozt_recs.py — подготовка природоохранных реком�
 
 Единицы назначения мероприятий (режим выбирается в окне или ключом unit_mode в конфигурации)
 --------------------------------------------------------------------------------------------
-    kv_vyd — кварталы и выделы: поля ООЗТ, квартала, выдела, типа; отчёт и схемы — по кварталам;
-    eco    — слой экосистем с уникальным ID, без кварталов: поля ID и типа (ООЗТ и название — по желанию);
+    kv_vyd  — кварталы и выделы: поля ООЗТ, квартала, выдела, типа; отчёт и схемы — по кварталам;
+    kv_cut  — экосистемы, разрезанные квартальной сетью: слой экосистем + вектор квартальной сети
+             (kvnet_path, поле номера квартала kvnet_field); экосистемы режутся границами кварталов,
+             в каждом квартале выделям присваиваются номера с 1 — с северо-запада, с запада на восток,
+             с севера на юг; отчёт и схемы — по кварталам (квартал X, выдел Y);
+    eco     — слой экосистем с уникальным ID, без кварталов: поля ID и типа (ООЗТ и название — по желанию);
              отчёт и схемы — по листам регулярной сетки (sheet_size_m, по умолчанию 1000 м)
              или по значениям поля группировки (report_group_field).
 
@@ -158,17 +162,28 @@ TYPE_NEARWATER = ("околовод", "болот")
 # =====================================================================================
 UNIT_MODES = {
     "kv_vyd": "Кварталы и выделы",
+    "kv_cut": "Экосистемы, разрезанные квартальной сетью",
     "eco": "Слой экосистем с уникальным ID (без кварталов)",
 }
+
+# кандидаты для автоподбора поля номера квартала в слое квартальной сети
+KVNET_KV_CANDIDATES = ["KV", "Квартал", "kv", "kvartal", "kvartal_no", "Kvartal", "квартал",
+                       "nom_kv", "Номер квартала", "quarter", "FID_kv"]
 
 
 @dataclass
 class Config:
     measures_xlsx: str = ""
-    unit_mode: str = "kv_vyd"            # kv_vyd — кварталы/выделы; eco — полигоны экосистем с уникальным ID
+    unit_mode: str = "kv_vyd"            # kv_vyd — кварталы/выделы; kv_cut — экосистемы, разрезанные
+                                         # квартальной сетью; eco — полигоны экосистем с уникальным ID
     oozt_path: str = ""                  # слой единиц территории (выделы или экосистемы)
     oozt_layer: str | None = None
-    oozt_name: str = ""                  # eco: название ООЗТ, если в слое нет поля ООЗТ
+    kvnet_path: str = ""                 # kv_cut: вектор квартальной сети
+    kvnet_layer: str | None = None
+    kvnet_field: str = ""                # kv_cut: поле с уникальным номером квартала в сети
+    kvnet_oozt_field: str = ""           # kv_cut: поле ООЗТ в сети (необязательно)
+    min_cut_ha: float = 0.01             # kv_cut: минимальная площадь куска экосистемы, га
+    oozt_name: str = ""                  # eco / kv_cut: название ООЗТ, если в слое нет поля ООЗТ
     report_group_field: str | None = None  # eco: поле группировки отчёта; пусто — листы регулярной сетки
     sheet_size_m: float = 1000.0         # eco: размер листа сетки для схем, м
     dem_path: str | None = None
@@ -898,6 +913,14 @@ FIELD_SPECS = {
         ("NAME", "Название экосистемы", False, ["Name", "NAME", "Название", "Ecosystem"]),
         ("OOZT", "ООЗТ (если поля нет — название ниже)", False, ["OOZT", "ООЗТ", "Name_OOZT"]),
     ],
+    # kv_cut: поля слоя экосистем; квартал и выдел назначаются разрезанием (kvnet_*)
+    "kv_cut": [
+        ("TYPE", "Тип (лес / луг / водные / околоводные)", True, ["Type", "TYPE", "Тип", "Расшифровка"]),
+        ("NAME", "Название экосистемы", False, ["Name", "NAME", "Название", "Ecosystem", "Расшифровка"]),
+        ("OOZT", "ООЗТ (если поля нет — из квартальной сети)", False, ["OOZT", "ООЗТ", "Name_OOZT"]),
+        ("ID", "Исходный ID экосистемы (по желанию)", False, ["ID", "Id", "id", "eco_id", "ECO_ID", "uid",
+                                                              "FID_ecosys", "fid_1"]),
+    ],
 }
 
 
@@ -1023,11 +1046,17 @@ class SetupWindow:
         ttk.Label(mf, foreground=self.C_MUTED, font=self.f_small,
                   text="полигоны выделов с полями ООЗТ, квартала и выдела; отчёт и схемы — по кварталам"
                   ).grid(row=1, column=0, sticky="w", padx=(24, 0))
+        ttk.Radiobutton(mf, text="Экосистемы, разрезанные квартальной сетью", value="kv_cut",
+                       variable=self.v_mode, command=self._on_mode).grid(row=2, column=0, sticky="w", pady=(4, 0))
+        ttk.Label(mf, foreground=self.C_MUTED, font=self.f_small,
+                  text="слой экосистем + вектор квартальной сети; экосистемы режутся границами кварталов, "
+                       "в каждом квартале — своя нумерация выделов с северо-запада; отчёт — по кварталам"
+                  ).grid(row=3, column=0, sticky="w", padx=(24, 0))
         ttk.Radiobutton(mf, text="Слой экосистем с уникальным ID (без кварталов)", value="eco",
-                        variable=self.v_mode, command=self._on_mode).grid(row=2, column=0, sticky="w", pady=(4, 0))
+                        variable=self.v_mode, command=self._on_mode).grid(row=4, column=0, sticky="w", pady=(4, 0))
         ttk.Label(mf, foreground=self.C_MUTED, font=self.f_small,
                   text="полигоны экосистем; отчёт и схемы — по листам регулярной сетки или по полю группировки"
-                  ).grid(row=3, column=0, sticky="w", padx=(24, 0))
+                  ).grid(row=5, column=0, sticky="w", padx=(24, 0))
 
         self.v_oozt = tk.StringVar()
         r = ttk.Frame(s2); r.pack(fill="x", pady=(8, 0))
@@ -1043,8 +1072,40 @@ class SetupWindow:
 
         self.fields_frame = ttk.Frame(s2)
         self.fields_frame.pack(fill="x", pady=(8, 0))
-        self.eco_frame = ttk.Frame(s2)
+        # kv_cut: файл квартальной сети, поле номера квартала, поле ООЗТ сети, название ООЗТ
+        self.kvnet_frame = ttk.Frame(s2)
+        self.v_kvnet = tk.StringVar()
+        self.v_kvnet_layer = tk.StringVar()
+        self.v_kvnet_field = tk.StringVar()
+        self.v_kvnet_oozt = tk.StringVar(value=NONE_FIELD)
         self.v_oozt_name = tk.StringVar()
+        r = ttk.Frame(self.kvnet_frame); r.pack(fill="x")
+        ttk.Label(r, text="Квартальная сеть:", width=18).pack(side="left")
+        ttk.Entry(r, textvariable=self.v_kvnet, state="readonly").pack(side="left", fill="x", expand=True)
+        ttk.Button(r, text="Выбрать…", command=self._pick_kvnet).pack(side="left", padx=(6, 0))
+        r = ttk.Frame(self.kvnet_frame); r.pack(fill="x", pady=(3, 0))
+        ttk.Label(r, text="Слой GPKG:", width=18).pack(side="left")
+        self.cb_kvnet_layer = ttk.Combobox(r, textvariable=self.v_kvnet_layer, state="disabled", width=38)
+        self.cb_kvnet_layer.pack(side="left")
+        self.cb_kvnet_layer.bind("<<ComboboxSelected>>", lambda e: self._read_kvnet_fields())
+        r = ttk.Frame(self.kvnet_frame); r.pack(fill="x", pady=(3, 0))
+        ttk.Label(r, text="Поле номера квартала:", width=18).pack(side="left")
+        self.cb_kvnet_field = ttk.Combobox(r, textvariable=self.v_kvnet_field, state="readonly", width=28)
+        self.cb_kvnet_field.pack(side="left")
+        self.cb_kvnet_field.bind("<<ComboboxSelected>>", lambda e: self._refresh())
+        r = ttk.Frame(self.kvnet_frame); r.pack(fill="x", pady=(3, 0))
+        ttk.Label(r, text="Поле ООЗТ сети:", width=18).pack(side="left")
+        self.cb_kvnet_oozt = ttk.Combobox(r, textvariable=self.v_kvnet_oozt, state="readonly", width=28)
+        self.cb_kvnet_oozt.pack(side="left")
+        self.cb_kvnet_oozt.bind("<<ComboboxSelected>>", lambda e: self._refresh())
+        ttk.Label(r, foreground=self.C_MUTED, font=self.f_small,
+                  text="необязательно").pack(side="left", padx=(6, 0))
+        r = ttk.Frame(self.kvnet_frame); r.pack(fill="x", pady=(3, 0))
+        ttk.Label(r, text="Название ООЗТ:", width=18).pack(side="left")
+        ttk.Entry(r, textvariable=self.v_oozt_name, width=30).pack(side="left")
+        ttk.Label(r, foreground=self.C_MUTED, font=self.f_small,
+                  text="если нет поля ООЗТ ни в экосистемах, ни в сети").pack(side="left", padx=(6, 0))
+        self.eco_frame = ttk.Frame(s2)
         self.v_group = tk.StringVar(value=NONE_FIELD)
         self.v_sheet = tk.StringVar(value="1000")
         ttk.Label(self.eco_frame, text="Название ООЗТ:").grid(row=0, column=0, sticky="w")
@@ -1481,6 +1542,47 @@ class SetupWindow:
         self._build_fields(guess=True)
         self._refresh()
 
+    def _read_kvnet_fields(self):
+        self.kvnet_columns = []
+        p = self.cfg.kvnet_path or ""
+        if p and Path(p).exists():
+            try:
+                self.kvnet_columns, _ = _vector_fields(p, self.v_kvnet_layer.get() or None)
+            except Exception:
+                self.kvnet_columns = []
+        cols = self.kvnet_columns
+        self.cb_kvnet_field.configure(values=cols)
+        if cols and self.v_kvnet_field.get() not in cols:
+            cur = self.cfg.kvnet_field
+            if cur not in cols:
+                cur = next((c for c in KVNET_KV_CANDIDATES if c in cols), None) or next(
+                    (c for c in cols if c.lower() in [x.lower() for x in KVNET_KV_CANDIDATES]), None)
+            self.v_kvnet_field.set(cur or "")
+        self.cb_kvnet_oozt.configure(values=[NONE_FIELD] + cols)
+        if cols and self.v_kvnet_oozt.get() not in [NONE_FIELD] + cols:
+            cur = self.cfg.kvnet_oozt_field
+            if cur not in cols:
+                cur = next((c for c in ("OOZT", "ООЗТ", "Name_OOZT") if c in cols), NONE_FIELD)
+            self.v_kvnet_oozt.set(cur)
+        self._refresh()
+
+    def _pick_kvnet(self):
+        ps = self._ask("vec", False, "Вектор квартальной сети (кварталы)")
+        if not ps:
+            return
+        self.cfg.kvnet_path = ps[0]
+        self.cfg.kvnet_layer = None
+        self.v_kvnet.set(ps[0])
+        p = ps[0]
+        if p.lower().endswith(".gpkg"):
+            layers = [l[0] for l in pyogrio.list_layers(p)]
+            self.cb_kvnet_layer.configure(values=layers, state="readonly")
+            self.v_kvnet_layer.set(layers[0])
+        else:
+            self.cb_kvnet_layer.configure(values=[], state="disabled")
+            self.v_kvnet_layer.set("")
+        self._read_kvnet_fields()
+
     def _build_fields(self, guess=False):
         ttk = self.ttk
         for w in self.fields_frame.winfo_children():
@@ -1510,6 +1612,10 @@ class SetupWindow:
                 self.v_group.set(NONE_FIELD)
         else:
             self.eco_frame.pack_forget()
+        if mode == "kv_cut":
+            self.kvnet_frame.pack(fill="x", pady=(6, 0), before=self.l_types)
+        else:
+            self.kvnet_frame.pack_forget()
 
     def _on_mode(self):
         self.cfg.fields = {}
@@ -1525,6 +1631,10 @@ class SetupWindow:
         c.oozt_name = self.v_oozt_name.get().strip()
         g = self.v_group.get()
         c.report_group_field = g if (c.unit_mode == "eco" and g and g != NONE_FIELD) else None
+        c.kvnet_layer = self.v_kvnet_layer.get() or None
+        c.kvnet_field = self.v_kvnet_field.get().strip()
+        ko = self.v_kvnet_oozt.get()
+        c.kvnet_oozt_field = ko if (c.unit_mode == "kv_cut" and ko and ko != NONE_FIELD) else ""
         try:
             c.sheet_size_m = max(50.0, float(str(self.v_sheet.get()).replace(",", ".")))
         except ValueError:
@@ -1677,7 +1787,24 @@ class SetupWindow:
                 self.columns, self.attr_df = _vector_fields(cfg.oozt_path, self.v_layer.get() or None)
             except Exception:
                 self.columns, self.attr_df = [], None
+        self.v_kvnet.set(cfg.kvnet_path or "")
+        self.v_kvnet_field.set(cfg.kvnet_field or "")
+        self.v_kvnet_oozt.set(cfg.kvnet_oozt_field or NONE_FIELD)
+        if cfg.kvnet_path and str(cfg.kvnet_path).lower().endswith(".gpkg") and Path(cfg.kvnet_path).exists():
+            layers = [l[0] for l in pyogrio.list_layers(cfg.kvnet_path)]
+            self.cb_kvnet_layer.configure(values=layers, state="readonly")
+            self.v_kvnet_layer.set(cfg.kvnet_layer if cfg.kvnet_layer in layers else layers[0])
+        else:
+            self.cb_kvnet_layer.configure(values=[], state="disabled")
+            self.v_kvnet_layer.set("")
         self._build_fields(guess=True)
+        if cfg.unit_mode == "kv_cut" and cfg.kvnet_path and Path(cfg.kvnet_path).exists():
+            try:
+                self.kvnet_columns, _ = _vector_fields(cfg.kvnet_path, self.v_kvnet_layer.get() or None)
+                self.cb_kvnet_field.configure(values=self.kvnet_columns)
+                self.cb_kvnet_oozt.configure(values=[NONE_FIELD] + self.kvnet_columns)
+            except Exception:
+                pass
         self._refresh()
 
     def _load_cfg_file(self):
@@ -1709,6 +1836,13 @@ class SetupWindow:
                 err.append(f"не задано поле «{label}»")
         if c.unit_mode == "eco" and not c.fields.get("OOZT") and not c.oozt_name:
             err.append("укажите поле ООЗТ или название ООЗТ")
+        if c.unit_mode == "kv_cut":
+            if not c.kvnet_path:
+                err.append("не выбран вектор квартальной сети")
+            elif not c.kvnet_field:
+                err.append("не задано поле номера квартала в квартальной сети")
+            elif not (c.fields.get("OOZT") or c.kvnet_oozt_field or c.oozt_name):
+                err.append("укажите поле ООЗТ (в экосистемах или в сети) или название ООЗТ")
         if c.unit_mode == "eco" and self.attr_df is not None and c.fields.get("ID") in self.attr_df.columns:
             if self.attr_df[c.fields["ID"]].duplicated().any():
                 err.append("в поле ID экосистемы есть повторы")
@@ -2222,6 +2356,8 @@ class Data:
             if not self.F_NAME:
                 g["Name"] = g["Type"]
             g["KV"], g["KV_SORT"] = self._report_groups(g, grp_vals)
+        elif cfg.unit_mode == "kv_cut":
+            g = self._cut_by_kvartals(g, pick)
         else:
             self.F_OOZT = pick("OOZT", spec["OOZT"][1])
             self.F_KV = pick("KV", spec["KV"][1])
@@ -2256,6 +2392,91 @@ class Data:
                  L["units_gen"], L["groups_n"].lower(), g["KV"].nunique(),
                  ", ".join(map(str, g["OOZT"].unique())))
         return g
+
+    def _cut_by_kvartals(self, g: gpd.GeoDataFrame, pick) -> gpd.GeoDataFrame:
+        """Режим kv_cut: экосистемы разрезаются границами кварталов. В каждом квартале — новая
+        нумерация получившихся выделов с 1: от северо-западного угла квартала, с запада на восток,
+        с севера на юг (по положению центрода: сначала север, при равной северности — западнее левее)."""
+        cfg = self.cfg
+        spec = {k: cands for k, _, _, cands in FIELD_SPECS["kv_cut"]}
+        self.F_TYPE = pick("TYPE", spec["TYPE"])
+        self.F_NAME = pick("NAME", spec["NAME"], required=False)
+        self.F_OOZT = pick("OOZT", spec["OOZT"], required=False)
+        self.F_ID = pick("ID", spec["ID"], required=False)
+        cfg.fields = {k: v for k, v in {"TYPE": self.F_TYPE, "NAME": self.F_NAME, "OOZT": self.F_OOZT,
+                                        "ID": self.F_ID}.items() if v}
+        ren = {self.F_TYPE: "Type"}
+        if self.F_NAME and self.F_NAME != self.F_TYPE:
+            ren[self.F_NAME] = "Name"
+        if self.F_OOZT:
+            ren[self.F_OOZT] = "OOZT"
+        if self.F_ID:
+            ren[self.F_ID] = "ECO_ID"
+        g = g.rename(columns=ren)
+        g = g.drop(columns=[c for c in ("KV", "VYD", "KVOOZT", "KV_SORT", "VYD_SORT", "uid", "area_ha")
+                             if c in g.columns], errors="ignore")
+        if "Name" not in g.columns:
+            g["Name"] = g["Type"]
+        g["geometry"] = g.geometry.buffer(0)
+
+        if not cfg.kvnet_path:
+            raise KeyError("Не выбран вектор квартальной сети (kvnet_path)")
+        kv = read_vector(cfg.kvnet_path, cfg.kvnet_layer)
+        kv = kv[kv.geom_type.isin(["Polygon", "MultiPolygon"])].copy()
+        if kv.empty:
+            raise ValueError("В векторе квартальной сети нет полигонов")
+        kf = cfg.kvnet_field or next((c for c in KVNET_KV_CANDIDATES if c in kv.columns), "")
+        if kf not in kv.columns:
+            raise KeyError(f"В квартальной сети не найдено поле номера квартала «{kf or '?'}» "
+                           f"(задайте kvnet_field)")
+        kv["KV"] = kv[kf].astype(str).str.strip()
+        ko = cfg.kvnet_oozt_field
+        kv["KVOOZT"] = (kv[ko].astype(str).str.strip() if ko and ko in kv.columns else "").replace(
+            {"nan": "", "None": ""})
+        kv = kv[["KV", "KVOOZT", "geometry"]].copy()
+        kv["geometry"] = kv.geometry.buffer(0)
+        kv = kv.dissolve(by=["KV", "KVOOZT"], as_index=False)   # многочастный квартал → один полигон
+        log.info("Квартальная сеть: %s, поле «%s»: %d кварталов", Path(cfg.kvnet_path).name, kf,
+                 kv["KV"].nunique())
+
+        eco_area_ha = g.geometry.area.sum() / 1e4
+        inter = gpd.overlay(g, kv, how="intersection", keep_geom_type=True)
+        inter = inter.explode(index_parts=False).reset_index(drop=True)
+        if inter.empty:
+            raise ValueError("Пересечение экосистем с квартальной сетью пусто: слои не перекрываются")
+        min_ha = float(getattr(cfg, "min_cut_ha", 0.01) or 0)
+        if min_ha > 0:
+            a = inter.geometry.area / 1e4
+            small = a < min_ha
+            if small.any():
+                log.info("Разрезание: отброшено %d мельчайших кусочков < %.3f га (всего %.2f га)",
+                         int(small.sum()), min_ha, float(a[small].sum()))
+                inter = inter[~small].reset_index(drop=True)
+        covered = inter.geometry.area.sum() / 1e4
+        if eco_area_ha - covered > 0.01:
+            log.info("Разрезание: %.1f га (%.1f%%) экосистем лежит вне квартальной сети — в выделы не вошли",
+                     eco_area_ha - covered, 100 * (eco_area_ha - covered) / eco_area_ha)
+
+        o = (inter["OOZT"].astype(str).str.strip() if "OOZT" in inter.columns
+             else pd.Series("", index=inter.index)).replace({"nan": "", "None": ""})
+        kvo = inter["KVOOZT"].astype(str).str.strip().replace({"nan": "", "None": ""})
+        inter["OOZT"] = o.where(o != "", kvo)
+        fallback = (cfg.oozt_name or "").strip() or Path(cfg.oozt_path).stem
+        inter["OOZT"] = inter["OOZT"].where(inter["OOZT"] != "", fallback)
+        if "Name" not in inter.columns:
+            inter["Name"] = inter["Type"]
+
+        # нумерация выделов в каждом (ООЗТ, квартал): с северо-запада, с запада на восток, с севера на юг
+        c_ = inter.geometry.centroid
+        inter["_y"], inter["_x"] = c_.y.values, c_.x.values
+        inter["_kvs"] = _nat_rank(inter["KV"].astype(str))
+        inter["_oos"] = _nat_rank(inter["OOZT"].astype(str))
+        inter = inter.sort_values(["_oos", "_kvs", "_y", "_x"], ascending=[True, True, False, True],
+                                  kind="mergesort").reset_index(drop=True)
+        inter["VYD"] = inter.groupby(["OOZT", "KV"], sort=False).cumcount() + 1
+        log.info("Экосистемы разрезаны кварталами: %d экосистем → %d выделов; нумерация в каждом "
+                 "квартале с 1 (северо-запад → восток, север → юг)", len(g), len(inter))
+        return inter.drop(columns=[c for c in ("_x", "_y", "_kvs", "_oos", "KVOOZT") if c in inter.columns])
 
     def _report_groups(self, g: gpd.GeoDataFrame, grp_vals=None):
         """Режим eco: группа отчёта — значение поля группировки или лист регулярной сетки (A1, A2, …)."""
