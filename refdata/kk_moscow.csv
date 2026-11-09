@@ -1,0 +1,571 @@
+﻿ru,latin,cat_raw,cat
+Обыкновенный ёж,Erinaceus europaeus,2 (гор.),2
+Обыкновенная кутора,Neomys fodiens,2 (гор.),2
+Ночница Брандта,Myotis brandtii,4,4
+Водяная ночница,Myotis daubentonii,4,4
+Обыкновенный ушан,Plecotus auritus,4,4
+Лесной нетопырь,Pipistrellus nathusii,4,4
+Рыжая вечерница,Nyctalus noctula,2,2
+Двухцветный кожан,Vespertilio murinus,1,1
+Горностай,Mustela ermine а,1,1
+Ласка,Mustela nivalis,3,3
+Чёрный хорь,Mustela putorius,1,1
+Лесная куница,Martes martes,2 (гор.),2
+Каменная куница,Martes foina,1,1
+Барсук,Meles meles,3,3
+Заяц,беляк - Lepus timidus,2,2
+Заяц,русак - Lepus europaeus,1,1
+Орешниковая соня,Muscardinus avellanarius,4,4
+Лесная мышовка,Sicista betulina,4,4
+Водяная полёвка,Arvicola terrestris,3,3
+Речной бобр,Castor fiber,3,3
+Мышь,малютка - Micromus minutus,3,3
+Желтогорлая мышь,Apodemus flavicollis,3 (гор.),3
+Обыкновенная летяга,Pteromys volans,3,3
+Черношейная поганка,Podiceps nigricollis,1,1
+"Чомга, или Большая поганка",Podiceps cristatus,2,2
+"Волчок, или Малая выпь",Ixobrychus minutus,1,1
+Большая выпь,Botaurus stellaris,1,1
+Серая цапля,Ardea cinerea,4 (пр.),4
+Чирок,свистунок - Anas crecca,1,1
+Серая утка,Anas strepera,О,О
+Чирок,трескунок - Anas querquedula,1,1
+Широконоска,A nas clypeata,1,1
+Красноголовый нырок,Aythya ferina,2,2
+Хохлатая чернеть,Aythya fuligula,3,3
+Гоголь,Bucephala clangula,1,1
+Чёрный коршун,Milvus migrans,2,2
+Полевой лунь,Circus cyaneus,1,1
+Луговой лунь,Circus pygargus,1,1
+Болотный лунь,Circus aeruginosus,1,1
+Обыкновенный осоед,Pernis apivorus,О,О
+Тетеревятник,A ccipiter gentilis,5,5
+Перепелятник,Accipiter nisus,3,3
+Обыкновенный канюк,Buteo buteo,1 (гор.),1
+Сапсан,Falco peregrinus,1,1
+Чеглок,Falco subbuteo,2,2
+Пустельга,Falco tinnunculus,3,3
+Серая куропатка,Perdix perdix,2,2
+Перепел,Coturnix coturnix,1,1
+Рябчик,Bonasa bonasia,3,3
+Погоныш,Porzana porzana,1,1
+Коростель,Crex crex,3,3
+Камышница,Gallinula chloropus,3,3
+Лысуха,Fulica atra,1,1
+Малый зуёк,Charadrius dubius,1,1
+Чибис,Vanellus vanellus,1,1
+Черныш,Tringa ochropus,2 (гор.),2
+Травник,Tringa totanus,1,1
+Перевозчик,Actitis hypoleucos,1,1
+Бекас,Gallinago gallinago,1,1
+Вальдшнеп,Scolopax rusticola,1 (гор.),1
+Озёрная чайка,Larus ridibundus,2,2
+Сизая чайка,Larus canus,2,2
+Речная крачка,Sterna hirundo,2,2
+Чёрная крачка,Chlidonias nigra,2,2
+Клинтух,Columba oenas,О,О
+Вяхирь,Columba palumbus,3,3
+Обыкновенная горлица,Streptopelia turtur,4 (пр.),4
+Обыкновенная кукушка,Cuculus canorus,2 (гор.),2
+Ушастая сова,Asio otus,3,3
+Домовый сыч,A thene noctua,1,1
+Серая неясыть,Strix aluco,2 (гор.),2
+Длиннохвостая неясыть,Strix uralensis,1,1
+Болотная сова,Asio flammeus,О,О
+Воробьиный сыч,Glaucidium passerinum,3,3
+Мохноногий сыч,Aegolius funereus,1,1
+Козодой,Caprimulgus europaeus,1,1
+Обыкновенный зимородок,Alcedo atthis,1,1
+Удод,Upupa epops,1,1
+Вертишейка,Jynx torquilla,3,3
+Седой дятел,Picus canus,1,1
+Желна,Dryocopus martius,2 (гор.),2
+Средний пёстрый дятел,Dendrocopos medius,1,1
+Белоспинный дятел,Dendrocopos leucotos,5,5
+Трёхпалый дятел,Picoides tridactylus,2,2
+Зелёный дятел,Picus viridis,3,3
+"Береговушка, или Береговая ласточка",Riparia riparia,1,1
+"Касатка, или деревенская ласточка",Hirundo rustica,4 (гор.),4
+"Воронок, или городская ласточка",Delichon urbicum,4 (гор.),4
+Полевой жаворонок,Alauda arvensis,1 (гор.),1
+Лесной конёк,Anthus trivialis,2 (гор.),2
+Луговой конёк,Anthus pratensis,1,1
+Жёлтая трясогузка,Motacilla flava,3,3
+Желтоголовая трясогузка,Motacilla citreola,1,1
+Обыкновенный жулан,Lanius collurio,5,5
+Обыкновенная иволга,Oriolus oriolus,2 (гор.),2
+Кедровка,Nucifraga caryocatactes,3,3
+Лесная завирушка,Prunella modularis,3,3
+Речной сверчок,Locustella fluviatilis,5,5
+Обыкновенный сверчок,Locustella naevia,1,1
+Тростниковая камышевка,Acrocephalus scirpaceus,О (гор.),О
+Дроздовидная камышевка,Acrocephalus arundinaceus,1,1
+Северная бормотушка,Hippolais caligata,3,3
+Ястребиная славка,Sylvia nisoria,3,3
+Мухоловка,белошейка - Ficedula albicollis,2,2
+Луговой чекан,Saxicola rubetra,3,3
+Обыкновенная горихвостка,Phoenicurus phoenicurus,2,2
+Деряба,Turdus viscivorus,2,2
+"Ополовник, или Длиннохвостая синица",Aegithalos caudatus,3,3
+Обыкновенный ремез,Remiz pendulinus,2,2
+"Пухляк, или Буроголовая гаичка",Parus montanus,2 (гор.),2
+Московка,Parus ater,2 (гор.),2
+Князек или Белая лазоревка,Parus cyanus,1,1
+Клест,еловик - Loxia curvirostra,2,2
+Веретеница ломкая,Anguis fragilis,1,1
+Прыткая ящерица,Lacerta agilis,1,1
+Живородящая ящерица,Lacerta vivipara,2 (гор.),2
+Обыкновенный уж,Natrix natrix,2,2
+Обыкновенная гадюка,Vipera berus,1,1
+Обыкновенный тритон,Triturus vulgaris,2,2
+Гребенчатый тритон,Triturus cristatus,1,1
+Краснобрюхая жерлянка,Bombina bombina,1,1
+Обыкновенная чесночница,Pelobatis fuscus,О,О
+Обыкновенная жаба,Bufo bufo,2,2
+Зеленая жаба,Bufo viridis,1,1
+Травяная лягушка,Rana temporaria,3 (гор.),3
+Остромордая лягушка,Rana arvalis,2 (гор.),2
+Стерлядь,Acipenser ruthenus,4,4
+Волжский подуст,Chondrostoma variabile,1,1
+Елец,Leuciscus leuciscus,2 (гор.),2
+Голавль,Leuciscus cephalus,2 (гор.),2
+Язь,Leuciscus idus,1 (гор.),1
+Краснопёрка,Scardinius erythrophthalmus,2,2
+Жерex,A sp iu s aspius,2,2
+Обыкновенный (речной) гольян,Phoxinus phoxinus,1 (гор.),1
+Линь,Tinea tinea,2,2
+Золотой (обыкновенный) карась,Carassius carassius,1 (гор.),1
+Усатый голец,Barbatula barbatula,2 (гор.),2
+Вьюн обыкновенный,Misgurnus fossilis,О (гор.),О
+Сом,Silurus glanis,2,2
+Налим,Lota lota,1 (гор.),1
+Обыкновенный ёрш,Gymnocephalus cernua,2,2
+Русский [обыкновенный] подкаменщик,Cottus koshewnikowi [Cottus gobio,1 (гор.),1
+Слизень чёрно,синий - Limax cinereoniger,3,3
+Щитень летний,Triops cancriformis,1,1
+Гигроликоза краснополосая,Hygrolycosa rubrofasciata,2,2
+Стрелка вооружённая,Coenagrion armatum,1,1
+Красотка блестящая,Calopteryx splendens,3 (гор.),3
+Красотка,девушка - Calopteryx virgo,2 (гор.),2
+"Коромысло тонкое, или зеленобокое",Aeshna affmis,1,1
+Коромысло малое,Aeshna coluberculus,2,2
+Коромысло зелёное,Aeshna viridis,1,1
+Коромысло рыжеватое,Aeshna isoceles,1,1
+Коромысло беловолосое,Brachytron pratense,1,1
+Дозорщик,император - Апах imperator,1,1
+"Стрекоза пьемонтская, или перевязанная",Sympetrum pedemontanum,3,3
+Цикада горная,Cicadetta montana,1 (гор.),1
+Пилохвост восточный,Poecilimon intermedins,1,1
+Мечник обыкновенный,Conocephalus discolor,2 (гор.),2
+Мечник короткокрылый,Conocephalus dorsalis,1,1
+Кузнечик певчий,Tettigonia cantans,5,5
+Кузнечик серый,Decticus verrucivorus,2 (гор.),2
+Кузнечик хвостатый,Tettigonia caudata,2,2
+Скачок зелёный,Metrioptera roeselii,5,5
+Скачок короткокрылый,Metrioptera brachyptera,2,2
+Скачок двухцветный,Metrioptera bicolor,2 (гор.),2
+Кустолюбка пепельная,Pholidoptera cinerea,3 (гор.),3
+Копьеуска пятнистая,Myrmeleotettix maculatus,1,1
+Кобылка большая болотная,Stethophyma grossum,2 (гор.),2
+Кобылка голубокрылая,Oedipoda coerulescens,1,1
+Травянка толстоголовая,Stenobothrus lineatus,1,1
+Ранатра палочковидная,Ranatra linearis,1,1
+Скакун,межняк - Cicindela hybrida,2 (гор.),2
+Скакун полевой,Cicindela campestris,2 (гор.),2
+Скакун германский,Cylindera germanica [Cicindela germanica],1,1
+Жужелица золотистоямчатая,Carabus clathratus,О,О
+Жужелица гладкая,Carabus glabratus,2 (гор.),2
+Жужелица шагреневая,Carabus coriaceus,3 (гор.),3
+Жужелица красноногая,Carabus cancellatus,2 (гор.),2
+Цихрус чёрный,Cychrus caraboides,2 (гор.),2
+Птеростих чернейший,Pterosticus aterrimus,1,1
+Плотинник ржавый,Leistus ferrugineus,3 (гор.),3
+Трехус [Эпафиус] речной,Trechus rivularis [Epaphius rivularis,2,2
+Офонус тёмный,Ophonus stictus,1,1
+"Хлениус, или Слизнеед, ребристый",Chlaenius costulatus,1,1
+Жужелица большой крестоносец,Panagaeus cruxmajor,1 (гор.),1
+Циминдис угловатый,Cymindis angular is,2,2
+Плавунец окаймлённый,Dytiscus marginalis,3 (гор.),3
+Рогачик жужелицевидный,Platycerus caraboides,3 (гор.),3
+Рогачик однорогий,Sinodendron cylindricum,2,2
+Бронзовка мраморная,Protaetia marmorata [Liocola marmorata],2,2
+Бронзовка металлическая,Protaetia metallica [Potosia metallica,1,1
+Бронзовка золотистая,Cetonia aurata,3 (гор.),3
+Восковик перевязанный,Trichius fasciatus,3 (гор.),3
+Светляк обыкновенный,Lampyris noctiluca,1 (гор.),1
+Тенелюб изящный,Phryganophilus auritus,1,1
+Борос Шнейдера,Boros schneideri,2 (гор.),2
+Майка обыкновенная,Meloe proscarabaeus,1 (гор.),1
+Майка фиолетовая,Meloe violacea,1 (гор.),1
+Дровосек,кожевник - Prionus coriarius,3 (гор.),3
+Короткокрыл большой,Necydalis major,3 (гор.),3
+Мегалодонт головастый,Megalodontes cephalotes,1,1
+Стеблевой пилильщик кочедыжниковый,Blasticotoma filiceti,2,2
+Немка рыженогая,Smicromyrme rufipes,1,1
+Мегарисса жемчужная,Megarhyssa perlata,1,1
+Бембекс носатый,Bembix rostrata,2,2
+Андрена серебристая,Andrena polyommatus,3,3
+Андрена Кларка,A ndrena clarkella,2,2
+Андрена Гатторфа,Andrena hattorfiana,2,2
+Андрена розовая,A ndrena rosae,2,2
+Андрена брюшистая,Andrena ventral is,3,3
+Галикт четырёхполосый,Halictus quadricinctus,2,2
+Систрофа спиральноусая,Systropha curvicornis,3,3
+Дюфурея невооружённая,Dufourea inermis,3,3
+Дюфурея малая,Dufourea minuta,3,3
+Рофит пятииглый,Rophites quinquespinosus,2,2
+Галикт бело,золотистый - Seladonia leucahenea,2,2
+Мохноногая пчела,Dasypoda hirtipes [D. plumipes],3,3
+Макропис желтоногий,Macropis fulvipes,2,2
+Мелитта красноватая,Melitta haemorrhoidalis,3,3
+Хелостома лютиковая,Chelostoma florisomne,2,2
+Гоплйтис трёхзубый,Hoplitis tridentata,3,3
+Шерстобит флорентийский,Anthidium florentinum,5 (гор.),5
+Шерстобит манжетный,Anthidium manicatum,5 (гор.),5
+Шерстобит продолговатый,Anthidium oblongatum,5 (гор.),5
+Шерстобит пунктированный,Anthidium punctatum,3,3
+Осмия двухцветная,Osmia bicolor,3,3
+Смолёвщица малая,Anthidiellum strigatum,3,3
+Смолёвщица шёлковая,Trachusa byssina,3,3
+Антофора [Гелиофила] двупятнистая,Anthophora bimaculata [Heliophila,3,3
+Антофора [Клизодон] вильчатая,Anthophora furcata [Clisodon furcatus],3,3
+Антофора весенняя,Anthophora plumipes [A. acervorum,3,3
+Антофора тусклая,Anthophora retusa,3,3
+Тетралония мальвовая,Tetralonia macroglossa,3,3
+Тетралония ивовая,Tetraloniella salicariae,3,3
+Тетралония зубчатая,Tetraloniella dentata,2,2
+Мелекта вооружённая,Melecta albifrons [М. armata],3,3
+Цератина синяя,Ceratina суапеа,5,5
+"Шмель изменчивый, или печальный",Bombus helferanus [В. humilis],2,2
+Шмель Шренка,Bombus schrencki,5 (гор.),5
+Шмель Джонэллы [йонеллюс],Bombus jonellus,3,3
+Шмель Семёнова,Тян-Шанского - Bombus semenoviellus,3,3
+Шмель лесной,Bombus sylvarum,3,3
+Шмель подземный,Bombus subterraneus,2,2
+Шмель конский,Bombus veteranus,2,2
+Шмель,чесальщик - Bombus distinguendus,2,2
+Шмель садовый,Bombus hortorum,2,2
+Шмель сорейский,Bombus soroeensis,3,3
+Шмель байкальский,Bombus deuteronymus,3,3
+Шмель конфузус,Bombus confusus,2,2
+Шмель,кукушка полевой - Psithyrus campestris,5,5
+Рыжие лесные муравьи,группа видов Formica rufa,1 (гор.),1
+Муравей тонкоголовый,Formica exsecta,1 (гор.),1
+"Пестрянка зелёная, или щавелевая",Adscita statices,1,1
+Пестрянка остеродская,Zygaena osterodensis,1,1
+Пестрянка жимолостная,Zygaena lonicerae,2,2
+Пестрянка горошковая,Zygaena viciae,2,2
+Пестрянка таволговая,Zygaena filipendulae,3,3
+Кархародус пушистый,Carcharodus flocciferus,1 (гор.),1
+Пиргус мальвовый,Pyrgus malvae,1 (гор.),1
+Картероцефалус палемон,Carterocephalus palaemon,2,2
+Картероцефалус лесной,Carterocephalus silvicola,3,3
+Толстоголовка морфей,Heteropterus morpheus,1 (гор.),1
+Махаон,Papilio machaon,2 (гор.),2
+Виды рода Беляночка,Leptidea,2 (гор.),2
+"Зорька, или аврора",Anthocharis cardamines,3,3
+Краеглазка эгерия,Pararge aegeria,3,3
+Сенница глицерион,Coenonympha glycerion,3,3
+Сенница аркания,Coenonympha arcania,2,2
+Бархатница ликаон,Hyponephele lycaon,2 (гор.),2
+Краеглазка ахина,Lopinga achine,3,3
+Краеглазка мэра,Lasiommata таега,3,3
+Эребия лигея,Erebia ligea,3,3
+"Переливница большая, или ивовая",Apatura iris,2,2
+Ленточник камилла,Limenitis Camilla,2,2
+"Многоцветница, или Углокрыльница, v",белое - Nymphalis vau-album,3 (гор.),3
+[Polygonia vau,album,5 (пр.),5
+Многоцветница чёрно,жёлтая - Nymphalis xanthomelas,3,3
+"Переливница малая, или тополёвая",A patura ilia,2,2
+Ленточник тополёвый,Limenitis populi,2,2
+Траурница,Nymphalis antiopa,2,2
+Шашечница авриния,Euphydryas aurinia,2,2
+"Шашечница матурна, или большая",Euphydryas maturna,4,4
+Шашечница аталия,Melitaea athalia,О (гор.),О
+Шашечница диамина,Melitaea diamina,О (гор.),О
+Перламутровка эвномия,Clossiana eunomia [Boloria eunomia],,
+Перламутровка эвфросина,Clossiana euphrosyne [Boloria euphrosyne],,
+Перламутровка селена,Clossiana selene,,
+Перламутровка северная,Boloria aquilonaris,,
+Перламутровка ниоба,Argynnis niobe (гор.),,
+Перламутровка адиппа,Argynnis adippe,1,1
+Перламутровка аглая,Argynnis aglaja,1,1
+"Перламутровка зеленоватая, или лаодика",Argynnis laodice,О,О
+Перламутровка большая лесная,Argynnis paphia,1,1
+"Перламутровка таволжанка, или ино",Brenthis ino,1,1
+Перламутровка диа,Clossiana dia,1,1
+Зефир берёзовый,Thecla betulae,3,3
+Зефир дубовый,Quercusia quercus [Thecla quercus],2,2
+Хвостатка падубовая,Nordmannia ilicis,3,3
+Хвостатка w,"белое, или вязовая - Nordmannia w-album",3,3
+Червонец непарный,Lycaena dispar [Thersamonolycaena dispar],2,2
+Червонец огненный,Lycaena virgaureae [Heodes virgaureae],3,3
+"Червонец бурый, или титир",Lycaena tityrus [Heodes tityrus],2,2
+"Червонец фиолетовый, или алкифрон",Lycaena alciphron [Heodes alciphron],1,1
+Червонец щавелевый,Lycaena hippothoe,2,2
+Червонец пятнистый,Lycaena phlaeas,4,4
+Малинница,Callophrys rubi,2,2
+"Голубянка горошковая, или аргиад",Cupido argiades [Everes argiades],2,2
+Г олубянка малая,Cupido minimus,1,1
+Г олубянка алексис,Glaucopsyche alexis,4,4
+Г олубянка эвмедон,Eumedonia eumedon,1,1
+Г олубянка аргус,Plebeius argus,3,3
+Голубянка торфяниковая,Plebeius optilete [Polyommatus optilete],1,1
+Пяденица головастая,Ecliptopera capitata,2,2
+Пяденица кипрейная,Ecliptopera silaceata,2,2
+Осиновая пяденица жёлтая,Stegania cararia,2,2
+Павлиноглазка малая,Eudia pavonia,2,2
+Павлиноглазка рыжая,Aglia tau,1,1
+"Лемония терновниковая, или осенний шелкопряд салатный",Lemonia dumi,1,1
+Березовый шелкопряд,Endromis versicolora,2,2
+Хохлатка Сиверса,Odontosia sieversii,2,2
+Шмелевидка скабиозовая,Hemaris tityus,О,О
+Шмелевидка жимолостная,Hemaris fuciformis,1,1
+Прозерпина,Proserpinus proserpina,4,4
+Бражник подмаренниковый,Hyles gallii,1,1
+"Бражник амурский, или осиновый",Laothoe amurensis,4,4
+Медведица,госпожа - Callimorpha dominula,2,2
+Медведица кайя,Arctia caja,1,1
+Орденская лента малая красная,Catocala promissa,1,1
+Орденская лента тополевая,Catocala elocata,1,1
+Орденская лента голубая,Catocala fraxini,3,3
+Орденская лента малиновая,Catocala sponsa,1,1
+Орденская лента розовая,Catocala pacta,4,4
+Капюшонница серебряная,Cucullia argentea,4,4
+Совка [Ксантия] лимонная,Tiliacea citrago [.Xanthia citrago],4,4
+Мома альпийская,Мота alpium,1,1
+Никтеола ложная,Nycteola degenerana,4,4
+Совка [Олигия] вечерняя,Lateroligia ophiogramma [Oligia ophiogramma,2,2
+Панемерия тёмная,Panemeria tenebrata,2,2
+Совка Хаворта,Celaena haworthii,2,2
+Лишайница,сестрица - Eilema sororcula,2,2
+Совка,луночка - Calophasia lunula,2,2
+Зеленоватая пяденица зубчатая,Chloroclystis v-ata,2,2
+Ольховая пяденица грязно,белая - Hydrelia sylvata,3,3
+Тера можжевельниковая,Thera juniper ata,2,2
+Пяденица кипрейная,Ecliptopera silaceata,2,2
+Скопуля торфяная,Scopula corrivalaria,1,1
+Жужжало разноцветное,Bombylius discolor,2,2
+Печальница угольная,Anthrax anthrax,2,2
+Печальница изменчивая,Anthrax varia,2,2
+Плаун годичный,Lycopodium annotinum,1,1
+Плаун булавовидный,Lycopodium clavatum,2,2
+Баранец обыкновенный,Huperzia selago,0,0
+Хвощ ветвистый,Equisetum ramosissimum,4,4
+Хвощ пёстрый,Equisetum variegatum,4,4
+Телиптерис болотный,Thelypteris palustris,3,3
+Страусник обыкновенный,Matteuccia struthiopteris,3,3
+Многорядник Брауна,Polystichum braunii,1,1
+Щитовник гребенчатый,Dryopteris cristata,3,3
+Щитовник распростёртый,Dryopteris expansa,3,3
+Гроздовник полулунный,Botrychium lunaria,1,1
+Можжевельник обыкновенный,Juniperus communis,1,1
+Кувшинка белоснежная,Nymphaea Candida,3,3
+Хохлатка полая,Corydalis cava,2,2
+Хохлатка промежуточная,Corydalis intermedia,2,2
+Хохлатка Маршалла,Corydalis marschalliana,2,2
+Калужница болотная,Caltha palustris,3,3
+Купальница европейская,Trollius europaeus,2,2
+"Борец северный, или высокий",Aconitum septentrionale,1,1
+Ветреница дубравная,Anemonoides nemorosa,2,2
+Печёночница благородная,Hepatica nobilis,1,1
+"Лютик языколистный, или длиннолистный",Ranunculus lingua,2,2
+Лютик волосистолистный,Ranunculus trichophyllus,1,1
+Росянка круглолистная,Drosera rotundifolia,2,2
+"Горец змеиный, или раковые шейки",Bistorta major,3,3
+Горицвет кукушкин,Coccyganthe flos-cuculi,3,3
+Смолка обыкновенная,Steris viscaria,3,3
+Дрёма двудомная,Melandrium dioicum,3,3
+Гвоздика травянка,Dianthus deltoides,2,2
+Гвоздика Фишера,Dianthus fischeri,3,3
+Бородник шароносный [молодило побегоноснОе],Jovibarba globifera,1,1
+Герань Роберта,Geranium robertianum,2,2
+Двулепестник альпийский,Circaea alpina,3,3
+Истод горьковатый,Polygala amarella,0,0
+Истод хохлатый,Polygala comosa,3,3
+Истод обыкновенный,Polygala vulgaris,1,1
+Язвенник обыкновенный,Anthyllis vulneraria,2,2
+Астрагал песчаный,Astragalus arenarius,2,2
+Астрагал датский,Astragalus danicus,3,3
+Астрагал солодколистный,Astragalus glycyphyllos,2,2
+Горошек кашубский,Vicia cassubica,1,1
+Чина чёрная,Lathyrus niger,1,1
+Чина весенняя,Lathyrus vernus,3,3
+"Земляника зелёная, или луговая",Fragaria viridis,3,3
+Таволга обыкновенная,Filipendula vulgaris,3,3
+Берёза приземистая,Betula humilis,1,1
+Фиалка трёхцветная,Viola tricolor,2,2
+Волчье лыко обыкновенное,Daphne mezereum,2,2
+Синюха голубая,Polemonium caeruleum,2,2
+Первоцвет весенний,Primula veris,3,3
+Подъельник обыкновенный,Hypopitys monotropa,2,2
+Багульник болотный,Ledum palustre,2,2
+Подбел обыкновенный,Andromeda polifolia,1,1
+Болотный мирт,Chamaedaphne calyculata,2,2
+Голубика,Vaccinium uliginosum,2,2
+Клюква болотная,Oxycoccus palustris,2,2
+Вереск обыкновенный,Calluna vulgaris,О,О
+Подлесник европейский,Sanicula еигораеа,5,5
+Синеголовник плосколистный,Eryngium planum,3,3
+Линнея северная,Linnaea borealis,1,1
+Колокольчик болонский,Campanula bononiensis,2,2
+"Колокольчик олений, или жёстковолосистый",Campanula cervicaria,1,1
+Колокольчик широколистный,Campanula latifolia,3,3
+Колокольчик раскидистый,Campanula patula,5,5
+Колокольчик персиколистный,Campanula persicifolia,3,3
+Колокольчик круглолистный,Campanula rotundifolia,3,3
+Колокольчик крапиволистный,Campanula trachelium,3,3
+Посконник коноплёвый,Eupatorium cannabinum,2,2
+Кошачья лапка двудомная,Antennaria dioica,1,1
+Пупавка красильная,Anthemis tinctoria,3,3
+Скерда сибирская,Crepis sibirica,3,3
+Бузульник сибирский,Ligularia sibirica,1,1
+Колючник обыкновенный,Carlina vulgaris,1,1
+"Омфалодес ползучий, или пупочник",Omphalodes scorpioides,2,2
+Нонея тёмно,бурая - Nonea pulla,1,1
+Медуница неясная,Pulmonaria obscura,3,3
+Незабудка болотная,Myosotis palustris,3,3
+Воробейник лекарственный,Lithospermum officinale,2,2
+Вероника широколистная,Veronica teucrium,2,2
+Мытник Кауфмана,Pedicularis kaufmannii,2,2
+Мытник болотный,Pedicularis palustris,1,1
+Котовник венгерский,Nepeta pannonica,2,2
+"Тимьян, или чабрец, Лёви",Thymus loevyanus,2,2
+"Тимьян, или чабрец, Маршалла",Thymus marschallianus,1,1
+"Тимьян, или чабрец, блошиный",Thymus pulegioides,1,1
+Золототысячник обыкновенный,Centaurium erythraea,1,1
+Горечавка крестовидная,Gentiana cruciata,2,2
+Горечавка лёгочная,Gentiana pneumonanthe,1,1
+Шейхцерия болотная,Scheuchzeria palustris,1,1
+Лук угловатый,Allium angulosum,4,4
+Лук огородный,Allium oleraceum,2,2
+"Лук круглый, или Вальдштейна",Allium rotundum,2,2
+"Лук медвежий, или черемша",Allium ursinum L.,1,1
+Купена многоцветковая,Polygonatum multiflorum,2,2
+"Купена душистая, или лекарственная",Polygonatum odoratum,2,2
+"Ирис жёлтый, или аировидный",Iris pseudacorus,3,3
+Шпажник черепитчатый,Gladiolus imbricatus,1,1
+Пальчатокоренник балтийский,Dactylorhiza baltica,2,2
+Пальчатокоренник Фукса,Dactylorhiza fuchsii,1,1
+Пальчатокоренник мясо,красный - Dactylorhiza incamata,3,3
+Пальчатокоренник пятнистый,Dactylorhiza maculata,О,О
+Любка двулистная,Platanthera bifolia,1,1
+Любка зеленоцветковая,Platanthera chlorantha,1,1
+Дремлик широколистный,Epipactis helleborine,5,5
+Дремлик болотный,Epipactis palustris,1,1
+Тайник яйцевидный,Listera ovata,2,2
+Гнездовка настоящая,Neottia nidus-avis,3,3
+Ладьян трёхнадрезный,Corallorhiza trifida,2,2
+Гудайера ползучая,Goodyera repens,1,1
+Мякотница однолистная,Malaxis monophyllos,1,1
+Ежеголовник малый,Sparganium minimum,1,1
+Белоус торчащий,Nardus sricta,2,2
+Пушица многоколосковая,Eriophorum polystachyon,3,3
+Пушица влагалищная,Eriophorum vaginatum,2,2
+Осока прямоколосая,Carex atherodes,3,3
+Осока пушистоплодная,Сагех lasiocarpa,2,2
+Осока топяная,Carex limosa,2,2
+Овсик извилистый,Avenella flexuosa,1,1
+Кострец Бенекена,Bromopsis benekenii,4,4
+Овсяница высокая,Festuca altissima,2,2
+"Овсяница валлисская, или типчак",Festuca valesiaca,2,2
+Манник дубравный,Glyceria nemoralis,3,3
+Зубровка душистая,Hierochloe odorata,3,3
+Леерсия рисовидная,Leersia oryzoides,3,3
+Перловник пестрый,Melica picta С. Koch.,3,3
+Тимофеевка степная,Phleum phleoides,2,2
+Мятлик расставленный,Роа remota,3,3
+Зиглингия лежачая,Sieglingia decumbens,4,4
+Антоцерос пашенный,Anthoceros agrestis,О,О
+Варнсторфия бесколечковая,Warnstorfia exannulata,2,2
+Аномодон длиннолистный,Anomodon longifolius,1,1
+Аномодон утонченный,Anomodon attenuatus,1,1
+Ринхостегиум стенной,Rhynchostegium murale,1,1
+Птилиум гребенчатый,Ptilium crisla-castrensis,3,3
+Плагиотециум скрытный,Plagiothecium latebricola,О,О
+Родобриум розетковидный,Rhodobryum roseum,3,3
+Плагиомниум волнистый,Plagiomnium undulatum,2,2
+Дикранелла зобатая,Dicranella cerviculata,2,2
+Дикранум Бонжана,Dicranum bonjeanii,1,1
+Дикранум зелёный,Dicranum viride,2,2
+Дикранум многоножковый,Dicranum polysetum,3,3
+Гомалия трихомановидная,Homalia trichomanoides,3,3
+Атрихум жёлтоножковый,Atrichum flavisetum,2,2
+Синтрихия сельская,Syntrichia ruralis,3,3
+Зелигерия крошечная,Seligeria pusilla,1,1
+Сфагнум бахромчатый,Sphagnum fimbriatum,3,3
+Сфагнум магелланский,Sphagnum magellanicum,3,3
+Сфагнум обманчивый,Sphagnum fallax,3,3
+Сфагнум однобокий,Sphagnum subsecundum,3,3
+Лепидозия ползучая,Lepidozia reptans,1,1
+Метцгерия вильчатая,Metzgeria furcata,О,О
+Радула сплющенная,Radula complanata,5,5
+Торея реснитчатая,Thorea hispida,2,2
+Бангиядульцис чёрно,"пурпурный, или бангия чёрно-пурпурная - Bangiadulcis",4,4
+Хара ломкая,Chara fragilis,4,4
+Кладония лесная,Cladonia arbuscula,1,1
+Кладония гроздевидная,Cladonia botrytes,2,2
+Кладония трухлявая,Cladonia carioza,1,1
+Кладония вильчатая,Cladonia furcata,1 (гор.),1
+Кладония тощая,Cladonia macilenta,2,2
+Кладония звёздчатая,Cladonia stellaris,0 (гор.),0
+Кладония вздутая,Cladonia turgida,0 (гор.),0
+Кладония красноголовая,Cladonia coccifera,1,1
+Кладония оленья,Cladonia rangiferina,1 (гор.),1
+Гипогимния трубчатая,Hypogymnia tubulosa,2,2
+Леканора настенная,Lecanora muralis,3,3
+Цетрария исландская,Cetraria islandica,1 (гор.),1
+Эверния мезоморфная,Evernia mesomorpha,0 (гор.),0
+Эверния сливовая,Evernia prunastri,3,3
+Пармелиопсис сомнительный,Parmeliopsis ambigua,3 (гор.),3
+Уснея жёсткая,Usnea hirta,1 (гор.),1
+Уснея почти цветущая,Usnea subfloridana,1 (гор.),1
+Бриория волосовидная,Bryoria capillaris,1,1
+Бриория буроватая,Bryoria fuscescens,1,1
+Бриория переплетённая,Bryoria implexa,1,1
+"Флавопармелия морщинистая, или козья",Flavoparmelia caperata,1,1
+Псевдэверния зернистая,Pseudevernia furfuracea,2,2
+Рамалина мучнистая,Ramalina farinacea,1 (гор.),1
+Рамалина пыльцеватая,Ramalina pollinaria,1 (гор.),1
+Стереокаулон войлочный,Stereocaulon tomentosum,1,1
+Пельтигера собачья,Peltigera canina,0 (гор.),0
+Пельтигера рыжеватая,Peltigera rufescens,3,3
+Коллема топяная,Collema limosum,О,О
+Графис письменный,Graphis scripta,2,2
+Анаптихия реснитчатая,Anaptychia ciliaris,1,1
+Иономидотис неправильный,Ionomidotis irregularis,3,3
+Энцелия пучковая,Encoelia fascicularis,3,3
+Леоция студенистая,Leotia lubrica,3,3
+Булгария пачкающая,Bulgaria inquinans,3,3
+Кордицепс серо,пепельный - Cordyceps entomorrhiza,3,3
+Трутовик разветвленный,Polyporus umbellatus,3,3
+Климакодон северный,Climacodon septentrionalis,3,3
+"Грифола курчавая, или Гриб",баран - Grifola frondosa,2,2
+"Спарассис курчавый, или Грибная капуста",Sparassis crispa,2,2
+"Гиропор каштановый, или каштановый гриб",Gyroporus castaneus,2,2
+Дубовик крапчатый,Boletus luridiformis [В. erythropus],3,3
+Дубовик обыкновенный,Boletus luridus,,
+Подосиновик белый,Leccinum percandidum,,
+Подберёзовик болотный,Leccinum holopus (N,,
+Подберёзовик чёрный,Leccinum roseofractum,2,2
+"Лиофиллум скученный, или Рядовка сросшаяся",Lyophyllum connatum,2,2
+"Мицена шишколюбивая, или весенняя",Мусепа strobilicola,1,1
+Зонтик золотистый,Phaeolepiota аигеа,2,2
+Хризомфалина толстенькая,Chrysomphalina grossula,3,3
+Плютей ивовый,Pluteus salicinus,3,3
+Паутинник чешуйчатый,Cortinarius pholideus,3,3
+"Паутинник триумфальный, или жёлтый",Cortinarius triumphans,2,2
+Паутинник фиолетовый,Cortinarius violaceus,4,4
+Галерина моховая,Galerina hypnorum,3,3
+Г алерина болотная,Galerina paludosa,3,3
+Лератомицес чешуйчатый,Leratiomyces squamosus,3,3
+Ежовик коралловидный,Hericium coralloides,3,3
+Трутовик овечий,Albatrellus ovinus,3,3
+Сыроежка зеленоватая,Russula virescens,3,3
+Сетконоска сдвоенная,Dictyophora duplicata,4,4
+Решёточник красный,Clathrus ruber,4,4
+Кратероколла вишнёвая,Craterocolla cerasi,3,3
+Тремеллодон студенистый,Pseudohydnum gelatinosum,3,3
+Лейкоглое сжатая,Leucogloea compressa,3,3
+Ликогала коническая,Lycogala conicum,3,3
+Хемитрихия змеевидная,Hemitrichia serpula,3,3

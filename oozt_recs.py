@@ -45,6 +45,7 @@ import os
 import re
 import sys
 import tempfile
+import urllib.request
 import warnings
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
@@ -119,7 +120,7 @@ import rasterio
 from rasterio import features as rfeatures
 from rasterio.warp import reproject, Resampling, calculate_default_transform
 from rasterio.transform import from_origin
-from shapely.geometry import shape, box, Point
+from shapely.geometry import shape, box, Point, LineString
 from shapely.ops import unary_union
 from scipy import ndimage
 
@@ -188,6 +189,7 @@ class Config:
     sheet_size_m: float = 1000.0         # eco: размер листа сетки для схем, м
     dem_path: str | None = None
     trails: list[str] = field(default_factory=list)
+    informal_trails: list = field(default_factory=lambda: ["auto"])   # «auto» — скачать из OSM (informal=yes); иначе пути к файлам
     hydro_lines: list[str] = field(default_factory=list)
     hydro_polys: list[str] = field(default_factory=list)
     # слои видов и редких экосистем: [{path, category, group, kind, field}], см. SPECIES_*
@@ -384,16 +386,18 @@ RULES = {
         help="Участки с уклоном больше порога по ЦМР."),
     "species": dict(
         title="виды: находки", data=["species"], opt=[],
-        params=dict(types=None, category=None, groups=None, taxon=None, sources=None, sdm=0.75,
-                    min_ha=0.05, min_share=SHARED),
+        params=dict(types=None, category=None, groups=None, taxon=None, sources=None, kk_categories=None,
+                    sdm=0.75, min_ha=0.05, min_share=SHARED),
         help="Полигоны, где есть точки или полигоны выбранных видов; по моделям SDM — отдельная строка "
-             "«мониторинг»."),
+             "«мониторинг». Можно ограничить категориями Красной книги Москвы (столбец «КК Москвы: категории»)."),
     "species_trails": dict(
         title="виды: тропы у находок", data=["species"], opt=["trails"],
-        params=dict(types=None, category=None, groups=None, taxon=None, sources=None, dist=50.0, sdm=0.75,
+        params=dict(types=None, category=None, groups=None, taxon=None, sources=None, kk_categories=None,
+                    dist=50.0, sdm=0.75, informal_only=False,
                     min_ha=0.05, min_share=SHARED, vydel_min_ha=None, vydel_max_ha=None),
         help="Тропы в заданном расстоянии от точек и внутри полигонов выбранных видов; по моделям SDM — "
-             "отдельная строка «мониторинг»."),
+             "отдельная строка «мониторинг». «Только стихийные тропы» — считать по слою OSM informal=yes; "
+             "можно ограничить категориями Красной книги Москвы."),
     "species_density": dict(
         title="виды: плотность находок", data=["species"], opt=[],
         params=dict(types=None, category=None, groups=None, taxon=None, window=500.0, quantile=0.75,
@@ -419,6 +423,12 @@ SPEC_COLUMNS = [
      "редкие экосистемы…; «любые» или пусто — все"),
     ("taxon", "Виды: таксоны (лат.)", "виды: такс",
      "латинские названия видов или родов через запятую (например, Corvus); пусто — все виды"),
+    ("kk_categories", "КК Москвы: категории", "кк моск",
+     "категории Красной книги Москвы (0–5, «О») через запятую; например «1, 2, 3» — под угрозой исчезновения, "
+     "редкие и уязвимые; пусто — без учёта Красной книги"),
+    ("informal_only", "Только стихийные тропы", "только стихийные троп",
+     "«да» — тропы у находок считаются только по слою стихийных троп OSM (informal=yes, скачивается "
+     "автоматически); «нет» или пусто — по всей дорожно-тропиночной сети"),
     ("sources", "Виды: данные", "виды: данн", "точки, полигоны, SDM (через запятую); «любые» или пусто — все"),
     ("dist", "Расстояние, м", "расстоян", "ширина полосы у воды или радиус вокруг точек видов"),
     ("window", "Окно плотности, м", "окно", "радиус скользящего окна для растра плотности"),
@@ -577,6 +587,29 @@ def _parse_value(key: str, raw):
         return (None, None) if _is_any(t) else (_split_list(t), None)
     if key in ("water_only", "water_except"):
         return (None, None) if _is_any(t) else (_split_list(t), None)
+    if key == "kk_categories":                    # категории Красной книги Москвы: 0–5, «О»
+        if _is_any(t):
+            return None, None
+        vals = []
+        for x in _split_list(t):
+            if x.upper() in ("О", "O"):
+                vals.append("О")
+                continue
+            try:
+                v = int(float(x))
+            except ValueError:
+                return None, f"неизвестная категория Красной книги: {x}"
+            if not 0 <= v <= 5:
+                return None, f"категория Красной книги должна быть от 0 до 5: {x}"
+            vals.append(v)
+        return vals, None
+    if key == "informal_only":                    # «да» / «нет»
+        v = t.lower().replace("ё", "е")
+        if v in ("да", "1", "истина", "true", "вкл", "только стихийные", "стихийные"):
+            return True, None
+        if v in ("нет", "0", "ложь", "false", "выкл", "все", "любые", "-"):
+            return False, None
+        return None, f"да или нет: «{t}»"
     try:
         v = float(t.replace(",", ".").replace("%", "").strip())
     except ValueError:
@@ -694,6 +727,8 @@ def _sel_txt(p) -> str:
     parts = [f"категория — {cat}", f"группы — {grp}"]
     if p.get("taxon"):
         parts.append("таксоны — " + ", ".join(p["taxon"]))
+    if p.get("kk_categories"):
+        parts.append("КК Москвы — категории " + ", ".join(str(c) for c in p["kk_categories"]))
     if "sources" in p:
         parts.append("данные — " + (", ".join(SPECIES_KINDS[s] for s in p["sources"]) if p.get("sources")
                                     else "точки, полигоны, SDM"))
@@ -747,7 +782,9 @@ def describe_spec(spec: dict, full: bool = False) -> str:
         if r == "species_trails":
             at = (f"; только выделы от {_fmt(p['vydel_min_ha'])} га" if p.get("vydel_min_ha") is not None else "") \
                  + (f" до {_fmt(p['vydel_max_ha'])} га" if p.get("vydel_max_ha") is not None else "")
-            return (f"тропы в {_fmt(p['dist'])} м от точек и в полигонах видов ({sel}){sdm}{at}; {_types_txt(p)}")
+            inf = "; только стихийные тропы OSM (informal=yes)" if p.get("informal_only") else ""
+            return (f"тропы в {_fmt(p['dist'])} м от точек и в полигонах видов ({sel}){sdm}{at}{inf}; "
+                    f"{_types_txt(p)}")
         if r == "species_density":
             return (f"плотность точек видов ({sel}) в окне {_fmt(p['window'])} м ≥ {_q_txt(p['quantile'])}; "
                     f"{_types_txt(p)}; {_patch_txt(p)}")
@@ -1196,6 +1233,10 @@ class SetupWindow:
                   ).pack(anchor="w", pady=(0, 4))
         for spec in LAYER_SPECS:
             self._layer_row(s3, spec)
+        self.v_informal = tk.BooleanVar(value=True)
+        ttk.Checkbutton(s3, text="Стихийные тропы: скачивать из OSM (informal=yes; нужен интернет) — "
+                                "слой для мероприятий со столбцом «Только стихийные тропы» = да",
+                        variable=self.v_informal).pack(anchor="w", pady=(6, 0))
         self._species_block(s3)
 
         # ---- правая колонка
@@ -1703,6 +1744,7 @@ class SetupWindow:
         c.report_kv = [int(x) if x.isdigit() else x for x in c.report_kv]
         c.basemap = bool(self.v_basemap.get())
         c.split_multipart = bool(self.v_split.get())
+        c.informal_trails = ["auto"] if self.v_informal.get() else []
         try:
             c.min_share_pct = max(0.0, float(self.v_minshare.get().replace(",", ".") or 0))
         except ValueError:
@@ -1833,6 +1875,7 @@ class SetupWindow:
         self.v_kv.set(", ".join(map(str, cfg.report_kv or [])))
         self.v_basemap.set(bool(cfg.basemap))
         self.v_split.set(bool(getattr(cfg, "split_multipart", True)))
+        self.v_informal.set("auto" in (cfg.informal_trails or []))
         self.v_minshare.set(f"{float(getattr(cfg, 'min_share_pct', 25.0)):g}")
         for k, v in self.v_formats.items():
             v.set(k in (cfg.report_formats or []))
@@ -2323,6 +2366,112 @@ def _part_ids(ids: pd.Series, g: gpd.GeoDataFrame) -> pd.Series:
     return out
 
 
+# =====================================================================================
+#        СПРАВОЧНИКИ: КРАСНАЯ КНИГА МОСКВЫ, ИНВАЗИВНЫЕ ВИДЫ, СТИХИЙНЫЕ ТРОПЫ OSM
+# =====================================================================================
+_REF_DIR = Path(__file__).resolve().parent / "refdata"
+_REF_CACHE: dict = {}
+
+
+def _norm_latin(s) -> str:
+    """«Pulmonaria obscura Duch. [P. officinalis]» → «pulmonaria obscura»: первые два слова, строчными."""
+    t = re.sub(r"\[.*?\]|\(.*?\)", " ", str(s or "")).lower()
+    parts = [p for p in re.split(r"[^a-zà-ÿ-]+", t) if p]
+    return " ".join(parts[:2]) if len(parts) >= 2 else (parts[0] if parts else "")
+
+
+def _load_ref(name: str, cols: list) -> dict:
+    """CSV из refdata/ → {нормализованное латинское название: {столбец: значение}}."""
+    if name in _REF_CACHE:
+        return _REF_CACHE[name]
+    ref = {}
+    p = _REF_DIR / name
+    try:
+        df = pd.read_csv(p, encoding="utf-8-sig")
+        for _, row in df.iterrows():
+            key = _norm_latin(row.get("latin"))
+            if key:
+                ref[key] = {c: row.get(c) for c in cols}
+        log.info("Справочник %s: %d позиций", p.name, len(ref))
+    except Exception as e:
+        log.warning("Справочник %s не загружен (%s): определение категории Красной книги недоступно",
+                    p.name, e)
+    _REF_CACHE[name] = ref
+    return ref
+
+
+def kk_ref() -> dict:
+    """Красная книга Москвы, 3-е издание (ПП Москвы № 745-ПП от 02.07.2019, Приложение 2):
+    латинское название → категория (0–5 или «О») и русское название."""
+    ref = _load_ref("kk_moscow.csv", ["cat", "ru"])
+    for v in ref.values():                     # категория: int, «О» или NaN
+        c = v["cat"]
+        try:
+            v["cat"] = int(float(c))
+        except (TypeError, ValueError):
+            v["cat"] = str(c).strip() if str(c).strip() else np.nan
+    return ref
+
+
+def kk_category(species):
+    """Категория Красной книги Москвы для вида: 0–5, «О» или NaN (вида нет в КК)."""
+    r = kk_ref().get(_norm_latin(species))
+    return np.nan if r is None else r["cat"]
+
+
+def invasive_ref() -> dict:
+    """Инвазивные виды Москвы (перечень к ПП Москвы № 369-ПП от 03.03.2026):
+    латинское название → группа (I–IV), жизненная форма, русское название."""
+    return _load_ref("invasive_moscow.csv", ["group", "life_form", "ru"])
+
+
+OVERPASS_ENDPOINTS = [
+    "https://overpass-api.de/api/interpreter",
+    "https://overpass.kumi.systems/api/interpreter",
+    "https://overpass.private.coffee/api/interpreter",
+    "https://maps.mail.ru/osm/tools/overpass/api/interpreter",
+]
+
+
+def download_informal_trails_osm(bbox_wgs84, out_dir) -> Path | None:
+    """Стихийные тропы OSM (линии с тегом informal=yes) через Overpass API → GeoJSON (WGS 84).
+    При неудаче (нет интернета, Overpass недоступен) возвращает None — скрипт продолжит без слоя."""
+    w, s, e, n = [float(x) for x in bbox_wgs84]          # total_bounds: (minx, miny, maxx, maxy)
+    q = f'[out:json][timeout:90];way["informal"="yes"]({s:.6f},{w:.6f},{n:.6f},{e:.6f});out geom;'
+    data = None
+    for url in OVERPASS_ENDPOINTS:
+        try:
+            req = urllib.request.Request(url, data=q.encode("utf-8"),
+                                         headers={"User-Agent": "oozt-recs/1.0 (природоохранные рекомендации ООЗТ)"})
+            with urllib.request.urlopen(req, timeout=45) as r:
+                data = json.loads(r.read().decode("utf-8"))
+            break
+        except Exception as e:
+            log.warning("Overpass %s: %s", url, e)
+    if not data:
+        log.warning("Стихийные тропы OSM не скачаны (Overpass API недоступен) — слой пропущен, "
+                    "правила «только стихийные тропы» используют всю дорожно-тропиночную сеть")
+        return None
+    lines, ids = [], []
+    for el in data.get("elements", []):
+        if el.get("type") != "way" or "geometry" not in el:
+            continue
+        coords = [(p["lon"], p["lat"]) for p in el["geometry"]]
+        if len(coords) >= 2:
+            lines.append(LineString(coords))
+            ids.append(el.get("id"))
+    if not lines:
+        log.warning("В OSM нет линий informal=yes в границах территории")
+        return None
+    g = gpd.GeoDataFrame({"osm_id": ids}, geometry=lines, crs=4326)
+    out = Path(out_dir) if str(out_dir or "").strip() else Path.cwd()
+    out.mkdir(parents=True, exist_ok=True)
+    p = out / "informal_trails_osm.geojson"
+    g.to_file(p, driver="GeoJSON", encoding="utf-8")
+    log.info("Стихийные тропы OSM (informal=yes): %d сегментов → %s", len(g), p.name)
+    return p
+
+
 class Data:
     """Все загруженные слои в WORK_EPSG + служебные объекты."""
 
@@ -2339,7 +2488,8 @@ class Data:
         self.bbox_wgs84 = tuple(gpd.GeoSeries([box(*self.bounds_pad)], crs=WORK_EPSG).to_crs(4326).total_bounds)
         self.clip = box(*self.bounds_pad)
         self.trails = self.hydro_lines = self.hydro_polys = None
-        self.sp_points = self.sp_polys = None     # находки видов: species, category, group, layer, __src
+        self.trails_informal = None                # стихийные тропы OSM (informal=yes)
+        self.sp_points = self.sp_polys = None     # находки видов: species, category, group, layer, kk_cat, __src
         self.sp_rasters: list[dict] = []          # модели SDM: path, category, group, species
         self.dem = None
         self._inside = None
@@ -2347,6 +2497,7 @@ class Data:
             return
 
         self.trails = self._load_trails()
+        self.trails_informal = self._load_informal_trails()
         self.hydro_lines = read_many(cfg.hydro_lines, self.bbox_wgs84, self.clip)
         self.hydro_polys = read_many(cfg.hydro_polys, self.bbox_wgs84, self.clip)
         self.sp_points, self.sp_polys, self.sp_rasters = self._load_species_layers(species_layers(cfg))
@@ -2577,6 +2728,32 @@ class Data:
         g = g[g.geom_type.isin(["LineString", "MultiLineString"])].copy()
         return g if not g.empty else None
 
+    # ---- стихийные тропы (OSM informal=yes) ----
+    def _load_informal_trails(self):
+        cfg = self.cfg
+        paths = [str(x).strip() for x in (cfg.informal_trails or []) if str(x).strip()]
+        if getattr(cfg, "_need_informal", None) is False:
+            return None                      # ни одному включённому мероприятию слой не нужен
+        auto = any(x.lower() in ("auto", "авто", "osm") for x in paths)
+        files = [x for x in paths if x.lower() not in ("auto", "авто", "osm")]
+        if auto:
+            try:
+                p = download_informal_trails_osm(self.bbox_wgs84, cfg.out_dir)
+                if p is not None:
+                    files.append(str(p))
+            except Exception as e:
+                log.warning("Стихийные тропы: скачивание из OSM не удалось (%s)", e)
+        if not files:
+            return None
+        g = read_many(files, self.bbox_wgs84, self.clip)
+        if g is None or g.empty:
+            return None
+        g = g[g.geom_type.isin(["LineString", "MultiLineString"])].copy()
+        if g.empty:
+            return None
+        log.info("Стихийные тропы: %d сегментов (слой для правил «только стихийные тропы»)", len(g))
+        return g
+
     # ---- виды ----
     def _load_species_layers(self, layers):
         """Слои видов → общие таблицы точек и полигонов + список растров SDM (с категорией и группой)."""
@@ -2585,8 +2762,9 @@ class Data:
             name = Path(str(l["path"]).split("|")[0]).name
             tag = f"{l['category']}, {l['group']}"
             if l["kind"] == "sdm":
-                rasters.append(dict(l, species=species_from_filename(str(l["path"]).split("|")[0]), layer=i))
-                log.info("Слой видов %s (%s): модель SDM, вид «%s»", name, tag, rasters[-1]["species"])
+                sp = species_from_filename(str(l["path"]).split("|")[0])
+                rasters.append(dict(l, species=sp, kk_cat=kk_category(sp), layer=i))
+                log.info("Слой видов %s (%s): модель SDM, вид «%s»", name, tag, sp)
                 continue
             if l["kind"] not in ("points", "polygons"):
                 log.warning("Слой видов %s: не удалось определить тип данных — слой не используется", name)
@@ -2603,6 +2781,7 @@ class Data:
             g = g.copy()
             col = l["field"] if l.get("field") in g.columns else detect_species_column(g)
             g["species"] = g[col].astype(str).str.strip() if col else g["__src"]
+            g["kk_cat"] = g["species"].map(kk_category)      # категория Красной книги Москвы
             g["category"], g["group"], g["layer"] = l["category"], l["group"], i
             if col:
                 log.info("Слой видов %s (%s, %s): поле вида «%s», %d видов, %d объектов", name, tag,
@@ -2610,8 +2789,13 @@ class Data:
             else:
                 log.warning("Слой видов %s (%s): поле с латинскими названиями не найдено — вид = имя файла",
                             name, tag)
+            kk_sp = g.loc[g["kk_cat"].notna()].groupby("species")["kk_cat"].first()
+            if len(kk_sp):
+                log.info("Слой видов %s: в Красной книге Москвы — %s", name,
+                         ", ".join(f"{s} (кат. {c})" for s, c in kk_sp.head(8).items())
+                         + ("…" if len(kk_sp) > 8 else ""))
             (pts if l["kind"] == "points" else polys).append(
-                g[["species", "category", "group", "layer", "__src", "geometry"]])
+                g[["species", "category", "group", "layer", "kk_cat", "__src", "geometry"]])
         cat = lambda parts: gpd.GeoDataFrame(pd.concat(parts, ignore_index=True), crs=WORK_EPSG) if parts else None
         return cat(pts), cat(polys), rasters
 
@@ -2940,6 +3124,10 @@ def select_species(data: Data, p: dict):
         m = np.ones(len(g), dtype=bool)
         if p.get("category"):
             m &= g["category"].isin(p["category"]).values
+        if p.get("kk_categories"):
+            if "kk_cat" not in g.columns:           # справочник КК не загрузился
+                return None
+            m &= g["kk_cat"].isin(p["kk_categories"]).values
         if p.get("groups"):
             m &= g["group"].map(lambda x: group_matches(x, p["groups"])).values.astype(bool)
         if p.get("taxon"):
@@ -2952,6 +3140,8 @@ def select_species(data: Data, p: dict):
     if _uses(p, "sdm"):
         for r in data.sp_rasters:
             if p.get("category") and r["category"] not in p["category"]:
+                continue
+            if p.get("kk_categories") and r.get("kk_cat") not in p["kk_categories"]:
                 continue
             if not group_matches(r["group"], p.get("groups")):
                 continue
@@ -3042,6 +3232,12 @@ def rule_species_trails(data: Data, res: Results, measure: dict, p: dict):
     pts, polys, rasters = select_species(data, p)
     lab, lab_gen, dist = _sp_label(p), _sp_label(p, gen=True), p["dist"]
     trails = data.trails
+    if p.get("informal_only"):
+        if data.trails_informal is not None:
+            trails = data.trails_informal
+            log.info("  только стихийные тропы OSM (informal=yes): %d сегментов", len(trails))
+        else:
+            log.warning("  слой стихийных троп не загружен — используется вся дорожно-тропиночная сеть")
     target = _target(data, p)
     # ограничение по площади выдела (например, III.3 — ≥ 0,5 га, III.4 — < 0,5 га)
     amin, amax = p.get("vydel_min_ha"), p.get("vydel_max_ha")
@@ -4849,6 +5045,9 @@ def run(cfg: Config):
     _setup_logging(out)
     _MIN_SHARE[0] = float(getattr(cfg, "min_share_pct", 0) or 0)
     measures = read_measures(cfg.measures_xlsx)
+    # слой стихийных троп скачивается, только если он нужен включённому мероприятию
+    cfg._need_informal = any(
+        m.get("on") and measure_spec(m).get("p", {}).get("informal_only") for m in measures)
     data = Data(cfg, pad_m=spec_pad_m(measures))
     data.measures = measures
     cfg.save(out / "config_used.json")

@@ -10,6 +10,9 @@
   "trails": [
     "data/vec/osm-highway-line.shp"
   ],
+  "informal_trails": [
+    "auto"
+  ],
   "hydro_lines": [
     "data/vec/osm-hydroline.shp"
   ],
