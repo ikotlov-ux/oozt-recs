@@ -359,12 +359,13 @@ REQ, SHARED = "__обязательно__", "__окно__"      # парамет
 SPECIES_FILTERS = ("category", "groups", "taxon")
 RULES = {
     "type": dict(
-        title="по типу полигона", data=[], opt=[],
-        params=dict(types=REQ),
-        help="Назначается всем полигонам указанных типов. Пространственных расчётов нет."),
+        title="по типу полигона", data=[], opt=["hydro"],
+        params=dict(types=REQ, water_only=None, water_except=None),
+        help="Назначается всем полигонам указанных типов. Если задан фильтр водоёмов, назначаются "
+             "только полигоны, пересекающие выбранные водные объекты (по названию из слоя гидрографии)."),
     "trail_density": dict(
         title="плотность троп в полигоне", data=["trails"], opt=[],
-        params=dict(types=None, quantile=0.75),
+        params=dict(types=None, quantile=0.75, abs_m_ha=None),
         help="Длина троп внутри полигона / площадь полигона (м/га); назначается полигонам с плотностью "
              "не ниже квантиля среди полигонов этих типов."),
     "trail_hotspot": dict(
@@ -390,7 +391,7 @@ RULES = {
     "species_trails": dict(
         title="виды: тропы у находок", data=["species"], opt=["trails"],
         params=dict(types=None, category=None, groups=None, taxon=None, sources=None, dist=50.0, sdm=0.75,
-                    min_ha=0.05, min_share=SHARED),
+                    min_ha=0.05, min_share=SHARED, vydel_min_ha=None, vydel_max_ha=None),
         help="Тропы в заданном расстоянии от точек и внутри полигонов выбранных видов; по моделям SDM — "
              "отдельная строка «мониторинг»."),
     "species_density": dict(
@@ -398,6 +399,11 @@ RULES = {
         params=dict(types=None, category=None, groups=None, taxon=None, window=500.0, quantile=0.75,
                     min_ha=0.05, min_share=SHARED),
         help="Растр плотности точек выбранных видов в скользящем окне; участки не ниже квантиля."),
+    "road_buffer": dict(
+        title="буфер дорожной сети", data=["trails"], opt=[],
+        params=dict(types=None, dist_min=50.0, dist_max=100.0),
+        help="Назначается полигонам, пересекающим полосу между двумя расстояниями от дорожной сети "
+             "(например, 50–100 м от дорог)."),
 }
 RULE_TITLES = [v["title"] for v in RULES.values()]
 
@@ -419,9 +425,25 @@ SPEC_COLUMNS = [
     ("quantile", "Квантиль", "квантил", "порог плотности; 0,75 — верхний квартиль"),
     ("slope", "Уклон более, %", "уклон", "порог уклона, %"),
     ("sdm", "Порог SDM (0–1)", "порог sdm", "вероятность модели, начиная с которой участок учитывается"),
-    ("min_ha", "Мин. площадь участка, га", "мин. площ", "минимальная площадь участка внутри полигона"),
+    ("min_ha", "Мин. площадь участка, га", "мин. площадь участ", "минимальная площадь участка внутри полигона"),
     ("min_share", "Мин. доля полигона, %", "мин. дол",
      "минимальная доля площади полигона под участками; пусто — общий порог из окна скрипта"),
+    ("vydel_min_ha", "Мин. площадь выдела, га", "мин. площадь выдела",
+     "правило назначается только выделам не меньше этой площади (например, III.3 — от 0,5 га)"),
+    ("vydel_max_ha", "Макс. площадь выдела, га", "макс. площадь выдела",
+     "правило назначается только выделам меньше этой площади (например, III.4 — до 0,5 га)"),
+    ("abs_m_ha", "Плотность троп, м/га (порог)", "плотность троп",
+     "абсолютный порог плотности троп в полигоне, м/га; пусто — квантиль"),
+    ("water_only", "Водоёмы (только)", "водоемы (только)",
+     "названия водных объектов через запятую; назначаются только полигоны, пересекающие их "
+     "(совпадение по части названия, например «Лебедянский»); требует слой гидрографии"),
+    ("water_except", "Водоёмы (кроме)", "водоемы (кроме)",
+     "названия водных объектов через запятую; эти объекты исключаются (например, «отстойник»); "
+     "требует слой гидрографии"),
+    ("dist_min", "Буфер от дорог, мин., м", "буфер от дорог, мин",
+     "внутренний радиус полосы от дорожной сети (0 — от самих дорог)"),
+    ("dist_max", "Буфер от дорог, макс., м", "буфер от дорог, макс",
+     "внешний радиус полосы от дорожной сети"),
 ]
 SPEC_TITLE = {k: t for k, t, _, _ in SPEC_COLUMNS}
 DESC_COLUMN = "Процедура назначения (как работает скрипт)"
@@ -552,6 +574,8 @@ def _parse_value(key: str, raw):
             vals.append(v)
         return vals, None
     if key == "taxon":
+        return (None, None) if _is_any(t) else (_split_list(t), None)
+    if key in ("water_only", "water_except"):
         return (None, None) if _is_any(t) else (_split_list(t), None)
     try:
         v = float(t.replace(",", ".").replace("%", "").strip())
@@ -694,8 +718,18 @@ def describe_spec(spec: dict, full: bool = False) -> str:
         return "не рассчитывается — ошибка в параметрах: " + "; ".join(spec["errors"])
     if not full:
         if r == "type":
+            if p.get("water_only") or p.get("water_except"):
+                wf = (f"; водоёмы: только {', '.join(p['water_only'])}" if p.get("water_only") else "") \
+                     + (f"; кроме {', '.join(p['water_except'])}" if p.get("water_except") else "")
+                return f"все {_types_txt(p)}{wf}"
             return f"все {_types_txt(p)}"
+        if r == "road_buffer":
+            return (f"пересечение с полосой {_fmt(p['dist_min'])}–{_fmt(p['dist_max'])} м "
+                    f"от дорожной сети; {_types_txt(p)}")
         if r == "trail_density":
+            if p.get("abs_m_ha"):
+                return (f"плотность троп на полигон ≥ {_fmt(p['abs_m_ha'])} м/га (абсолютный порог); "
+                        f"{_types_txt(p)}")
             return f"плотность троп на полигон (м/га) ≥ {_q_txt(p['quantile'])}; {_types_txt(p)}"
         if r == "trail_hotspot":
             return (f"участки повышенной плотности троп (окно {_fmt(p['window'])} м, {_q_txt(p['quantile'])}); "
@@ -711,7 +745,9 @@ def describe_spec(spec: dict, full: bool = False) -> str:
         if r == "species":
             return f"находки видов ({sel}): полигоны с точками или полигонами находок{sdm}; {_types_txt(p)}"
         if r == "species_trails":
-            return (f"тропы в {_fmt(p['dist'])} м от точек и в полигонах видов ({sel}){sdm}; {_types_txt(p)}")
+            at = (f"; только выделы от {_fmt(p['vydel_min_ha'])} га" if p.get("vydel_min_ha") is not None else "") \
+                 + (f" до {_fmt(p['vydel_max_ha'])} га" if p.get("vydel_max_ha") is not None else "")
+            return (f"тропы в {_fmt(p['dist'])} м от точек и в полигонах видов ({sel}){sdm}{at}; {_types_txt(p)}")
         if r == "species_density":
             return (f"плотность точек видов ({sel}) в окне {_fmt(p['window'])} м ≥ {_q_txt(p['quantile'])}; "
                     f"{_types_txt(p)}; {_patch_txt(p)}")
@@ -737,10 +773,26 @@ def describe_spec(spec: dict, full: bool = False) -> str:
     sp = (f"Слои видов выбираются по признакам, заданным при загрузке: {_sel_txt(p)}. Название вида берётся из "
           "поля с латинскими названиями (если его нет — из имени файла; у растров SDM — всегда из имени файла).")
     if r == "type":
+        wf = ""
+        if p.get("water_only") or p.get("water_except"):
+            wf = (" Назначаются только полигоны, пересекающие водные объекты, выбранные по названию из "
+                  "полигональной гидрографии: " + (f"только {', '.join(p['water_only'])}" if p.get("water_only") else "все")
+                  + (f", кроме {', '.join(p['water_except'])}" if p.get("water_except") else "")
+                  + ". Совпадение по части названия.")
         return (f"Назначается всем {('полигонам типа «' + p['types'][1] + '»') if p.get('types') else 'полигонам'} "
                 "слоя территории. Тип определяется по началу слова (лес…, луг…, болот…); «водные» не включают "
-                "«околоводные». Других данных не требуется.")
+                f"«околоводные».{wf} Других данных не требуется.")
+    if r == "road_buffer":
+        return (f"Данные: {trails}. Вокруг дорожной сети строится полоса между расстояниями "
+                f"{_fmt(p['dist_min'])} и {_fmt(p['dist_max'])} м (сами дороги и акватория не входят). "
+                f"Мероприятие назначается каждому полигону, пересекающему полосу. В основании указывается ширина "
+                f"полосы; сама полоса показывается на схеме.")
     if r == "trail_density":
+        if p.get("abs_m_ha"):
+            return (f"Данные: {trails}. Для {tgt_each} считается плотность троп — длина троп внутри полигона, "
+                    f"делённая на его площадь (м/га). Мероприятие назначается полигонам с плотностью не ниже "
+                    f"абсолютного порога {_fmt(p['abs_m_ha'])} м/га (шкала рекреационной нагрузки: 50 — повышенная, "
+                    "100–150 — критическая). Полигон оценивается целиком, порог доли не применяется.")
         return (f"Данные: {trails}. Для {tgt_each} считается плотность троп — длина троп внутри полигона, "
                 f"делённая на его площадь (м/га). Среди этих полигонов с ненулевой плотностью вычисляется {q}. "
                 "Мероприятие назначается полигонам с плотностью не ниже порога; полигон оценивается целиком, "
@@ -778,9 +830,16 @@ def describe_spec(spec: dict, full: bool = False) -> str:
             z.append("сами полигоны находок")
         parts = [sp]
         if z:
+            at = ""
+            if p.get("vydel_min_ha") is not None or p.get("vydel_max_ha") is not None:
+                at = (f" Мероприятие назначается только полигонам площадью "
+                      + (f"от {_fmt(p['vydel_min_ha'])} га" if p.get("vydel_min_ha") is not None else "")
+                      + (" " if p.get("vydel_min_ha") is not None and p.get("vydel_max_ha") is not None else "")
+                      + (f"до {_fmt(p['vydel_max_ha'])} га" if p.get("vydel_max_ha") is not None else "") + ".")
             parts.append(f"1) Зоны видов — {' и '.join(z)}. 2) Тропы ({trails}) обрезаются по этим зонам. "
                          "3) Мероприятие назначается каждому полигону, в котором есть хотя бы фрагмент таких "
-                         "троп, без порогов длины и доли; в основании — виды и длина троп в зоне, м. Если слой "
+                         "троп, без порогов длины и доли; в основании — виды, длина троп в зоне (м) и координаты "
+                         "до трёх самых длинных фрагментов WGS 84." + at + " Если слой "
                          "троп не загружен, мероприятие назначается полигонам, пересекающим сами зоны.")
         if sdm:
             parts.append(sdm)
@@ -2575,6 +2634,11 @@ class Results:
         self.evidence: list[gpd.GeoDataFrame] = []
 
     def add(self, vydel_row, measure: dict, basis: str, value=None):
+        flags = measure.get("oozt_on") or {}
+        if flags:
+            oo = str(vydel_row["OOZT"]).strip()
+            if flags.get(oo) is False:        # мероприятие выключено для этой ООЗТ
+                return
         self.rows.append({
             "ООЗТ": vydel_row["OOZT"], "Квартал": vydel_row["KV"], "Выдел": vydel_row["VYD"],
             "_sort": vydel_row.get("KV_SORT", vydel_row["KV"]),
@@ -2677,12 +2741,54 @@ def _eco_label(p: dict) -> str:
     return f"в полигонах типа «{t[1]}»"
 
 
+def _water_names(g: gpd.GeoDataFrame) -> gpd.GeoSeries:
+    """Столбец с названиями водных объектов (NAME_RU / NAME / name), если есть."""
+    for c in g.columns:
+        if c != "geometry" and str(c).upper() in ("NAME_RU", "NAME"):
+            return g[c].astype(str).fillna("")   # пропуски → пустая строка, не NaN
+    return None
+
+
+def _select_water_bodies(data: Data, p: dict) -> gpd.GeoDataFrame | None:
+    """Водные объекты по фильтру «только/кроме» (совпадение по части названия)."""
+    if data.hydro_polys is None or data.hydro_polys.empty:
+        return None
+    wb = data.hydro_polys
+    names = _water_names(wb)
+    only, except_ = p.get("water_only"), p.get("water_except")
+    if names is None:
+        log.warning("  у полигональной гидрографии нет поля с названиями — фильтр водоёмов пропущен")
+        return wb if only is None else None
+    low = names.fillna("").str.lower()          # NaN в названиях не должен ломать фильтр
+    if only:
+        wb = wb[low.apply(lambda s: any(t.lower() in s for t in only))]
+        log.info("  водоёмы «только %s»: %d из %d", ", ".join(only), len(wb), len(low))
+    if except_ and len(wb):
+        low2 = names.loc[wb.index].str.lower()
+        wb = wb[~low2.apply(lambda s: any(t.lower() in s for t in except_))]
+        log.info("  водоёмы «кроме %s»: исключено %d", ", ".join(except_), int((low2.apply(
+            lambda s: any(t.lower() in s for t in except_))).sum()))
+    return wb
+
+
 def rule_type(data: Data, res: Results, measure: dict, p: dict):
-    """Назначение по типу выдела."""
+    """Назначение по типу выдела; для водных мер — фильтр по названиям водоёмов."""
     keys, label = p["types"]
     sel = data.vydels_of_type(*keys)
+    water_note = ""
+    if p.get("water_only") or p.get("water_except"):
+        wb = _select_water_bodies(data, p)
+        if wb is None or wb.empty:
+            sel = sel.iloc[0:0]
+        else:
+            geom = unary_union(wb.geometry.values)
+            sel = sel[sel.intersects(geom)]
+            if p.get("water_only"):
+                water_note = f"; водоёмы: только {', '.join(p['water_only'])}"
+            if p.get("water_except"):
+                water_note += f"; кроме {', '.join(p['water_except'])}"
     for _, r in sel.iterrows():
-        res.add(r, measure, f"тип {_unit_word()} «{r['Type']}» ({label})")
+        res.add(r, measure, f"тип {_unit_word()} «{r['Type']}» ({label}){water_note}")
     log.info("  → %d %s", len(sel), _units())
 
 
@@ -2710,6 +2816,7 @@ def rule_trail_density_vydel(data: Data, res: Results, measure: dict, p: dict):
         log.warning("  тропы не загружены — пропуск")
         return
     q = p["quantile"]
+    abs_thr = p.get("abs_m_ha")
     target = _target(data, p)
     tu = unary_union(data.trails.geometry.values)
     dens = target.geometry.intersection(tu).length / target["area_ha"]
@@ -2717,10 +2824,21 @@ def rule_trail_density_vydel(data: Data, res: Results, measure: dict, p: dict):
     pos = dens[dens > 0]
     if pos.empty:
         return
-    thr = float(np.quantile(pos, q))
-    sel = target[dens >= thr]
+    if abs_thr:                                   # абсолютный порог, м/га (вместо квартиля)
+        thr = float(abs_thr)
+        sel = target[dens >= thr]
+        log.info("  порог: абсолютный %g м/га", thr)
+
+        def _reason(d):
+            return f"плотность троп {d:.0f} м/га ≥ {thr:.0f} м/га (абсолютный порог)"
+    else:
+        thr = float(np.quantile(pos, q))
+        sel = target[dens >= thr]
+
+        def _reason(d):
+            return f"плотность троп {d:.0f} м/га ≥ {_qtag(q)} = {thr:.0f} м/га"
     for (_, r), d in zip(sel.iterrows(), dens[dens >= thr]):
-        res.add(r, measure, f"плотность троп {d:.0f} м/га ≥ {_qtag(q)} = {thr:.0f} м/га", round(d, 1))
+        res.add(r, measure, _reason(d), round(d, 1))
     trails_in = None
     if not sel.empty:
         # Красным показываем не целые исходные линии, а только их фрагменты
@@ -2925,6 +3043,18 @@ def rule_species_trails(data: Data, res: Results, measure: dict, p: dict):
     lab, lab_gen, dist = _sp_label(p), _sp_label(p, gen=True), p["dist"]
     trails = data.trails
     target = _target(data, p)
+    # ограничение по площади выдела (например, III.3 — ≥ 0,5 га, III.4 — < 0,5 га)
+    amin, amax = p.get("vydel_min_ha"), p.get("vydel_max_ha")
+    area_txt = ""
+    if amin is not None or amax is not None:
+        before = len(target)
+        if amin is not None:
+            target = target[target["area_ha"] >= float(amin)]
+        if amax is not None:
+            target = target[target["area_ha"] < float(amax)]
+        area_txt = f"; площадь выдела от {_fmt(amin)}" if amin is not None else ""
+        area_txt += f" до {_fmt(amax)} га" if amax is not None else " га"
+        log.info("  по площади выдела: %d из %d %s", len(target), before, _units())
     zones = []
     if pts is not None:
         b = pts.copy()
@@ -2951,7 +3081,12 @@ def rule_species_trails(data: Data, res: Results, measure: dict, p: dict):
                     r = data.oozt[data.oozt["uid"] == uid].iloc[0]
                     zz = z[z.intersects(r.geometry)]
                     sp = ", ".join(sorted(zz["species"].unique())[:8])
-                    res.add(r, measure, f"тропы в зоне {lab_gen} ({sp}): {grp['len'].sum():.0f} м",
+                    frag = grp.sort_values("len", ascending=False).geometry.head(3)
+                    mid = gpd.GeoSeries(frag, crs=WORK_EPSG).to_crs(4326).geometry.interpolate(0.5, normalized=True) \
+                        if len(frag) else None
+                    coords = "; ".join(f"({p_.y:.5f}, {p_.x:.5f})" for p_ in mid) if mid is not None else ""
+                    res.add(r, measure, f"тропы в зоне {lab_gen} ({sp}): {grp['len'].sum():.0f} м{area_txt}"
+                            + (f"; фрагменты (с.ш., в.д.): {coords}" if coords else ""),
                             round(grp["len"].sum()))
                 res.add_evidence(j, measure["name"], f"тропы на расстоянии {dist:.0f} м от {lab_gen}")
                 log.info("  тропы на расстоянии %.0f м от %s: %d %s", dist, lab_gen, j["uid"].nunique(), _units())
@@ -3020,10 +3155,52 @@ def rule_species_density(data: Data, res: Results, measure: dict, p: dict):
     log.info("  → %d %s (%d точек: %s)", len(hit), _units(), len(pts), lab)
 
 
+def rule_road_buffer(data: Data, res: Results, measure: dict, p: dict):
+    """Назначение полигонам, пересекающим полосу между двумя расстояниями от дорожной сети.
+
+    Проверка и слой-основание строятся по каждому полигону отдельно: буферизуется только
+    участок дорожной сети рядом с полигоном (иначе буфер всей сети переполняет память)."""
+    if data.trails is None:
+        log.warning("  дорожная сеть не загружена — пропуск")
+        return
+    dmin, dmax = float(p["dist_min"]), float(p["dist_max"])
+    target = _target(data, p)
+    if target.empty:
+        return
+    roads = data.trails
+    sidx = roads.sindex
+    sel_rows, ev_geoms = [], []
+    for _, r in target.iterrows():
+        g = r.geometry
+        near_idx = list(sidx.query(g.buffer(dmax), predicate="intersects"))
+        if not near_idx:
+            continue                                   # дороги дальше dmax — полосу не пересекает
+        near = unary_union([roads.geometry.values[i] for i in near_idx])
+        if dmin > 0:
+            inner = near.buffer(dmin)
+            if inner.covers(g):
+                continue            # полигон целиком в ближней зоне — до полосы не достаёт
+            annulus = near.buffer(dmax).difference(inner)
+        else:
+            annulus = near.buffer(dmax)
+        sel_rows.append(r)
+        ev_geoms.append(annulus.intersection(g))
+    band = (f"полоса {dmin:.0f}–{dmax:.0f} м от дорожной сети" if dmax > dmin > 0
+            else f"полоса до {dmax:.0f} м от дорожной сети" if dmin <= 0
+            else f"полоса от {dmin:.0f} м от дорожной сети")
+    for r in sel_rows:
+        res.add(r, measure, f"пересечение с {band}")
+    if ev_geoms:
+        ev = gpd.GeoDataFrame(geometry=[x for x in ev_geoms if not x.is_empty], crs=WORK_EPSG)
+        res.add_evidence(ev, measure["name"], band)
+    log.info("  %s: → %d %s", band, len(sel_rows), _units())
+
+
 RULE_FUNCS = {
     "type": rule_type, "trail_density": rule_trail_density_vydel, "trail_hotspot": rule_trail_hotspot,
     "shore": rule_shore_trails, "slope": rule_slope, "species": rule_species,
     "species_trails": rule_species_trails, "species_density": rule_species_density,
+    "road_buffer": rule_road_buffer,
 }
 
 
@@ -3048,7 +3225,7 @@ def spec_pad_m(measures) -> float:
     for m in measures or []:
         if m.get("on"):
             p = measure_spec(m).get("p", {})
-            v = max([v] + [float(p[k]) for k in ("window", "dist") if p.get(k)])
+            v = max([v] + [float(p[k]) for k in ("window", "dist", "dist_max") if p.get(k)])
     return v
 
 
@@ -3081,15 +3258,35 @@ def read_measures(path: str) -> list[dict]:
             spec_cols[key] = c
     if spec_cols:
         log.info("Столбцы правил в таблице: %s", ", ".join(spec_cols.values()))
+    # флаги включения по отдельным ООЗТ: столбцы «Вкл_<ООЗТ>» (Вкл/Выкл; пусто — без ограничения)
+    oozt_flag_cols = {c: str(c).strip()[4:].strip() for c in df.columns
+                      if str(c).strip().lower().startswith("вкл_")}
+
+    def _flag(v):
+        t = str(v).strip().lower() if v is not None and not (isinstance(v, float) and np.isnan(v)) else ""
+        if not t:
+            return None
+        if t in ("0", "нет", "выкл", "выключено", "no", "false"):
+            return False
+        if t in ("1", "да", "вкл", "включено", "yes", "true"):
+            return True
+        return None
+
     out = []
     for i, r in df.iterrows():
         if pd.isna(r[c_name]):
             continue
         on = str(r[c_on]).strip().lower() in ("1", "1.0", "true", "да", "yes", "вкл")
+        flags = {}
+        for c, oo in oozt_flag_cols.items():
+            v = _flag(r.get(c))
+            if v is not None:
+                flags[oo] = v
         out.append({
             "name": re.sub(r"\s+", " ", str(r[c_name])).strip(),
             "code": str(r[c_code]).strip() if c_code and not pd.isna(r[c_code]) else "",
             "on": on,
+            "oozt_on": flags,
             "method": None if pd.isna(r[c_method]) else str(r[c_method]).strip(),
             "group": re.sub(r"\s+", " ", str(r[c_group])).strip() if c_group and not pd.isna(r[c_group]) else "",
             "eco": str(r[c_eco]).strip() if c_eco and not pd.isna(r[c_eco]) else "",
