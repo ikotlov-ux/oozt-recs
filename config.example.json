@@ -19,6 +19,24 @@
   "hydro_polys": [
     "data/vec/osm-hydropoly.shp"
   ],
+  "drainage": [
+    "data/vec/drainage_ditches.shp"
+  ],
+  "wetlands": [
+    "data/vec/wetlands.shp"
+  ],
+  "roads_paved": [
+    "data/vec/roads_paved.shp"
+  ],
+  "roads_dirt": [
+    "data/vec/roads_dirt.shp"
+  ],
+  "recreation": [
+    "data/vec/recreation_points.shp"
+  ],
+  "lesopat_points": [
+    "data/PVN_Lesopatologiya.xlsx"
+  ],
   "invasive_points": [
     "data/vec/vascular_invasive.shp"
   ],
