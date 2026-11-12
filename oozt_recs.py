@@ -158,6 +158,16 @@ TYPE_MEADOW = ("луг",)
 TYPE_WATER = ("водн",)          # «Водные»
 TYPE_NEARWATER = ("околовод", "болот")
 
+# Антропогенные луга: газоны (тип 503) и бурьян (тип 222); остальные луговые — естественные.
+# Маркеры ищутся подстрокой в значении поля типа (в т. ч. с кодами: «Газоны 503», «бурьян 222»).
+ANTHRO_MEADOW_MARKS = ("газон", "бурьян", "бурья", "503", "222")
+
+
+def _anthro_meadow(text) -> bool:
+    """Тип полигона — антропогенный луг (газоны 503 / бурьян 222)."""
+    t = str(text or "").lower().replace("ё", "е")
+    return any(m in t for m in ANTHRO_MEADOW_MARKS)
+
 # =====================================================================================
 #                                   КОНФИГУРАЦИЯ
 # =====================================================================================
@@ -539,18 +549,42 @@ def _type_word_match(kw: str, t_words: list[str]) -> bool:
     return any(w.startswith(kw[:n]) or (len(w) >= 4 and kw.startswith(w)) for w in t_words)
 
 
-def type_matches(type_value, keys) -> bool:
+def type_matches(type_value, keys, name_value=None) -> bool:
     """Тип полигона относится к одному из ключей. «водн» не совпадает с «околоводные»:
     иначе мероприятия только для водных экосистем (аэрация) попадают и на околоводные.
-    Ключ из нескольких слов («луговые естественные») требует совпадения каждого слова."""
-    t = str(type_value).lower()
+    Ключ из нескольких слов требует совпадения каждого слова; слово-стем (лес, луг,
+    болот, водн) ищется в поле «Тип», слова-уточнения («широколиственные»,
+    «естественные») — в «Тип» или названии полигона (name_value).
+    Луга: «луговые естественные» — луговые типы, кроме газонов (503) и бурьяна (222);
+    «луговые антропогенные» — газоны и бурьян (слово «луг» в типе не обязательно)."""
+    t = str(type_value or "").lower()
     t_water = t.replace("околовод", "")          # «водн» ищем вне слова «околоводные»
     tw = [w for w in re.split(r"[^а-яa-z0-9]+", t) if w]
     tw_w = [w for w in re.split(r"[^а-яa-z0-9]+", t_water) if w]
+    ta = tw + [w for w in re.split(r"[^а-яa-z0-9]+", str(name_value or "").lower())
+               if w and w not in tw]
+    is_meadow = any("луг" in w for w in tw)
     for k in keys:
+        kl = k.lower().replace("ё", "е")
+        if "луг" in kl and "естественн" in kl:
+            if is_meadow and not _anthro_meadow(t + " " + str(name_value or "")):
+                return True
+            continue
+        if "луг" in kl and "антропоген" in kl:
+            if _anthro_meadow(t + " " + str(name_value or "")):
+                return True
+            continue
         kws = [w for w in re.split(r"[^а-яa-z0-9]+", k) if w]
-        src = tw_w if k in TYPE_WATER else tw
-        if kws and all(_type_word_match(kw, src) for kw in kws):
+        if not kws:
+            continue
+        ok = True
+        for kw in kws:
+            stem = next((s for s, _ in TYPE_WORDS if s in kw), None)
+            src = tw_w if stem == "водн" else (tw if stem else ta)
+            if not _type_word_match(kw, src):
+                ok = False
+                break
+        if ok:
             return True
     return False
 
@@ -627,7 +661,8 @@ def _split_list(t) -> list[str]:
 def parse_types(text):
     """«лесные, луговые» → (('лес', 'луг'), 'лесные, луговые'); «любые» → None.
     Уточнённые типы из нескольких слов сохраняются целиком: «луговые естественные» —
-    отдельный ключ, не совпадающий с просто «луговыми» (антропогенными)."""
+    отдельный ключ; луговые типы без газонов (503) и бурьяна (222) — естественные
+    (см. type_matches), газоны и бурьян — антропогенные."""
     t = str(text or "").strip()
     if _is_any(t):
         return None
@@ -3091,7 +3126,11 @@ class Data:
         return gpd.GeoDataFrame(rows, crs=WORK_EPSG)
 
     def vydels_of_type(self, *keys) -> gpd.GeoDataFrame:
-        m = self.oozt["Type"].map(lambda t: type_matches(t, keys)).values.astype(bool)
+        has_name = "Name" in self.oozt.columns
+        m = self.oozt.apply(
+            lambda r: type_matches(r.get("Type"), keys,
+                                   r.get("Name") if has_name else None),
+            axis=1).values.astype(bool)
         return self.oozt[m]
 
     def quarters(self) -> gpd.GeoDataFrame | None:
@@ -3881,9 +3920,10 @@ def rule_kolokolchik(data: Data, res: Results, measure: dict, p: dict):
     else:
         log.warning("  слой дорог с твёрдым покрытием не задан — полоса от дорог не учитывается")
     for _, r in target.iterrows():
+        s = f"{r.get('Type', '')} {r.get('Name', '')}".lower().replace("ё", "е")
         hab = next(((nm, sp) for keys, nm, sp in KOLOKOL_HABITATS
-                    if any(k in f"{r.get('Type', '')} {r.get('Name', '')}".lower().replace("ё", "е")
-                           for k in keys)), None)
+                    if ("луг" not in keys or ("луг" in s and not _anthro_meadow(s)))
+                    and any(k in s for k in keys)), None)
         if hab is None:
             continue
         zones, ha = [], 0.0
