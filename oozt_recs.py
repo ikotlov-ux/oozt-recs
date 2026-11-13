@@ -52,7 +52,11 @@ from pathlib import Path
 from typing import Iterable
 
 # ---- локальная папка pylib рядом со скриптом (чистые Python-пакеты: openpyxl, contextily, python-docx) ----
-_pylib = Path(__file__).resolve().parent / "pylib"
+# Jupyter: __file__ не определён — используем текущую папку ноутбука
+try:
+    _pylib = Path(__file__).resolve().parent / "pylib"
+except NameError:
+    _pylib = Path.cwd() / "pylib"
 if _pylib.is_dir() and str(_pylib) not in sys.path:
     sys.path.append(str(_pylib))          # append: пакеты окружения имеют приоритет
 
@@ -122,6 +126,8 @@ from rasterio.warp import reproject, Resampling, calculate_default_transform
 from rasterio.transform import from_origin
 from shapely.geometry import shape, box, Point, LineString
 from shapely.ops import unary_union
+from shapely.validation import make_valid
+import shapely
 from scipy import ndimage
 
 import matplotlib
@@ -133,6 +139,121 @@ from matplotlib.lines import Line2D
 log = logging.getLogger("oozt")
 logging.getLogger("pyogrio").setLevel(logging.WARNING)
 logging.getLogger("rasterio").setLevel(logging.WARNING)
+
+
+# =====================================================================================
+#        ПОЧИНКА ГЕОМЕТРИЙ: невалидные полигоны (TopologyException) и многочастные
+# =====================================================================================
+def _keep_polygons_only(g: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
+    """Оставить только полигоны: буферные/сервисные слои должны состоять из полигонов,
+    остальные типы (линии, точки) выбрасываются с записью в журнал."""
+    if g is None or g.empty:
+        return g
+    ok = g.geom_type.isin(["Polygon", "MultiPolygon"])
+    if not ok.all():
+        log.warning("  отброшено %d неполигональных объектов", int((~ok).sum()))
+        g = g[ok].copy()
+    return g
+
+
+def _poly_part(geom):
+    """make_valid может вернуть коллекцию (полигоны + линии): берём полигональную часть."""
+    if geom is not None and geom.geom_type == "GeometryCollection":
+        polys = [g for g in geom.geoms if g.geom_type in ("Polygon", "MultiPolygon")]
+        if polys:
+            return polys[0] if len(polys) == 1 else unary_union(polys)
+    return geom
+
+
+def repair_geometries(g: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
+    """Починить невалидные геометрии: make_valid (для полигонов — с выделением
+    полигональной части); пустые и NaN — выбросить. Тип слоя (линии, точки) сохраняется.
+    Возвращает GeoDataFrame или None, если объектов не осталось."""
+    if g is None:
+        return None
+    g = g[~g.geometry.isna() & ~g.geometry.is_empty]
+    if g.empty:
+        return None
+    invalid = ~g.geometry.is_valid
+    if invalid.any():
+        log.info("  починено невалидных геометрий: %d", int(invalid.sum()))
+        g = g.copy()
+
+        def _fix(geom):
+            try:
+                v = make_valid(geom)
+            except Exception:
+                try:
+                    v = geom.buffer(0)
+                except Exception:
+                    return None
+            return _poly_part(v) if geom.geom_type in ("Polygon", "MultiPolygon") else v
+
+        g.loc[invalid, "geometry"] = g.loc[invalid, "geometry"].apply(_fix)
+        g = g[~g.geometry.isna() & ~g.geometry.is_empty]
+    return g if not g.empty else None
+
+
+def _safe_union(geoms) -> "BaseGeometry":
+    """unary_union с починкой: make_valid по каждому; при TopologyException —
+    buffer(0) по одному; если и это не спасает — пересечение коробок."""
+    if geoms is None:
+        return None
+    try:
+        return unary_union(geoms)
+    except Exception:
+        pass
+    fixed, union = [], None
+    for g in geoms:
+        try:
+            g2 = g if g.is_valid else make_valid(g)
+        except Exception:
+            try:
+                g2 = g.buffer(0)
+            except Exception:
+                continue
+        if g2 is None or g2.is_empty:
+            continue
+        fixed.append(g2)
+        try:
+            union = g2 if union is None else unary_union([union, g2])
+        except Exception:
+            try:
+                union = g2 if union is None else union.union(g2.buffer(0))
+            except Exception:
+                continue
+    if union is None:
+        log.warning("  объединение геометрий не удалось даже с починкой — пусто")
+        return None
+    return union
+
+
+def _safe_overlay(left: gpd.GeoDataFrame, right: gpd.GeoDataFrame, how: str = "intersection",
+                  keep_geom_type: bool = True) -> gpd.GeoDataFrame:
+    """gpd.overlay с починкой геометрий: при TopologyException обе стороны проходят
+    через make_valid/buffer(0) и пересечение повторяется; итог — только полигоны."""
+    try:
+        return gpd.overlay(left, right, how=how, keep_geom_type=keep_geom_type)
+    except Exception:
+        pass
+    log.warning("  пересечение слоёв упало (невалидные геометрии) — чиню и повторяю")
+    a, b = repair_geometries(left), repair_geometries(right)
+    if a is None or b is None:
+        return gpd.GeoDataFrame(columns=["geometry"], geometry=[], crs=WORK_EPSG)
+    try:
+        j = gpd.overlay(a, b, how=how, keep_geom_type=keep_geom_type)
+        return j
+    except Exception:
+        pass
+    # последняя попытка: buffer(0) по каждой стороне
+    try:
+        a = a.copy(); a["geometry"] = a.geometry.buffer(0)
+        b = b.copy(); b["geometry"] = b.geometry.buffer(0)
+        return gpd.overlay(_keep_polygons_only(a), _keep_polygons_only(b), how=how,
+                           keep_geom_type=keep_geom_type)
+    except Exception as e:
+        log.error("  пересечение слоёв не удалось даже после починки: %s", e)
+        return gpd.GeoDataFrame(columns=["geometry"], geometry=[], crs=WORK_EPSG)
 
 # =====================================================================================
 #                                    ПАРАМЕТРЫ
@@ -2236,6 +2357,9 @@ def read_vector(path: str, layer: str | None = None, bbox_wgs84=None) -> gpd.Geo
     g = g.set_crs(crs, allow_override=True)
     if g.crs.to_epsg() != WORK_EPSG:
         g = g.to_crs(WORK_EPSG)
+    g = repair_geometries(g)          # make_valid: защита от TopologyException в overlay/union
+    if g is None:
+        return gpd.GeoDataFrame(columns=["__src"], geometry=[], crs=WORK_EPSG)
     g["__src"] = Path(path).stem if not layer else f"{Path(path).stem}:{layer}"
     return g
 
@@ -2309,6 +2433,9 @@ def read_many(paths: Iterable[str], bbox_wgs84=None, clip=None) -> gpd.GeoDataFr
     if not parts:
         return None
     g = gpd.GeoDataFrame(pd.concat(parts, ignore_index=True), crs=WORK_EPSG)
+    g = repair_geometries(g)          # make_valid: защита от TopologyException
+    if g is None:
+        return None
     if clip is not None:
         g = g[g.intersects(clip)].copy()
     return g
@@ -2546,7 +2673,10 @@ def _part_ids(ids: pd.Series, g: gpd.GeoDataFrame) -> pd.Series:
 # =====================================================================================
 #        СПРАВОЧНИКИ: КРАСНАЯ КНИГА МОСКВЫ, ИНВАЗИВНЫЕ ВИДЫ, СТИХИЙНЫЕ ТРОПЫ OSM
 # =====================================================================================
-_REF_DIR = Path(__file__).resolve().parent / "refdata"
+try:
+    _REF_DIR = Path(__file__).resolve().parent / "refdata"
+except NameError:                        # Jupyter: __file__ не определён
+    _REF_DIR = Path.cwd() / "refdata"
 _REF_CACHE: dict = {}
 
 
@@ -2741,7 +2871,7 @@ class Data:
         self.cfg = cfg
         _CUR_CFG = cfg
         self.oozt = self._load_oozt()
-        self.union = unary_union(self.oozt.geometry.values)
+        self.union = _safe_union(self.oozt.geometry.values)
         self.bounds = tuple(self.oozt.total_bounds)
         pad = max(TRAIL_WINDOW_M, CORVUS_WINDOW_M, RARE_BUFFER_M, SHORE_BUFFER_M, pad_m) + 2 * CELL
         b = self.bounds
@@ -2754,6 +2884,11 @@ class Data:
         self.sp_rasters: list[dict] = []          # модели SDM: path, category, group, species
         self.dem = None
         self._inside = None
+        # все слои инициализированы: режим --report-only выходит раньше загрузки,
+        # но схемы/проект QGIS обращаются к атрибутам
+        self.drainage = self.wetlands = self.rec_points = None
+        self.roads_paved = self.roads_dirt = None
+        self.lesopat = None
         if oozt_only:                      # режим --report-only: остальные слои не нужны
             return
 
@@ -2900,7 +3035,7 @@ class Data:
                              if c in g.columns], errors="ignore")
         if "Name" not in g.columns:
             g["Name"] = g["Type"]
-        g["geometry"] = g.geometry.buffer(0)
+        g = repair_geometries(g)          # make_valid: защита от TopologyException при разрезании
 
         if not cfg.kvnet_path:
             raise KeyError("Не выбран вектор квартальной сети (kvnet_path)")
@@ -2917,13 +3052,13 @@ class Data:
         kv["KVOOZT"] = (kv[ko].astype(str).str.strip() if ko and ko in kv.columns else "").replace(
             {"nan": "", "None": ""})
         kv = kv[["KV", "KVOOZT", "geometry"]].copy()
-        kv["geometry"] = kv.geometry.buffer(0)
+        kv = repair_geometries(kv)
         kv = kv.dissolve(by=["KV", "KVOOZT"], as_index=False)   # многочастный квартал → один полигон
         log.info("Квартальная сеть: %s, поле «%s»: %d кварталов", Path(cfg.kvnet_path).name, kf,
                  kv["KV"].nunique())
 
         eco_area_ha = g.geometry.area.sum() / 1e4
-        inter = gpd.overlay(g, kv, how="intersection", keep_geom_type=True)
+        inter = _safe_overlay(g, kv, how="intersection", keep_geom_type=True)
         inter = inter.explode(index_parts=False).reset_index(drop=True)
         if inter.empty:
             raise ValueError("Пересечение экосистем с квартальной сетью пусто: слои не перекрываются")
@@ -3021,6 +3156,9 @@ class Data:
         g = read_many(files, self.bbox_wgs84, self.clip)
         if g is None or g.empty:
             return None
+        g = repair_geometries(g)          # make_valid: защита от TopologyException
+        if g is None or g.empty:
+            return None
         g = g[g.geom_type.isin(["LineString", "MultiLineString"])].copy()
         if g.empty:
             return None
@@ -3043,6 +3181,7 @@ class Data:
                 log.warning("Слой видов %s: не удалось определить тип данных — слой не используется", name)
                 continue
             g = read_many([l["path"]], self.bbox_wgs84, self.clip)
+            g = repair_geometries(g)      # make_valid: защита от TopologyException
             want = ["Point", "MultiPoint"] if l["kind"] == "points" else ["Polygon", "MultiPolygon"]
             if g is not None:
                 g = g[g.geom_type.isin(want)]
@@ -3243,7 +3382,7 @@ def _overlay_patches_to_vydels(data: Data, patches: gpd.GeoDataFrame, target: gp
     """Пересечение полигонов-пятен с выделами; возвращает DataFrame uid → площадь пятен (га), доля."""
     if patches is None or patches.empty or target.empty:
         return pd.DataFrame(columns=["uid", "patch_ha", "share"])
-    pu = unary_union(patches.geometry.values)
+    pu = _safe_union(patches.geometry.values)
     inter = target.geometry.intersection(pu)
     ha = inter.area / 1e4
     df = pd.DataFrame({"uid": target["uid"].values, "patch_ha": ha.values,
@@ -3322,7 +3461,7 @@ def rule_type(data: Data, res: Results, measure: dict, p: dict):
         if wb is None or wb.empty:
             sel = sel.iloc[0:0]
         else:
-            geom = unary_union(wb.geometry.values)
+            geom = _safe_union(wb.geometry.values)
             sel = sel[sel.intersects(geom)]
             if p.get("water_only"):
                 water_note = f"; водоёмы: только {', '.join(p['water_only'])}"
@@ -3359,7 +3498,7 @@ def rule_trail_density_vydel(data: Data, res: Results, measure: dict, p: dict):
     q = p["quantile"]
     abs_thr = p.get("abs_m_ha")
     target = _target(data, p)
-    tu = unary_union(data.trails.geometry.values)
+    tu = _safe_union(data.trails.geometry.values)
     dens = target.geometry.intersection(tu).length / target["area_ha"]
     dens = dens.replace([np.inf], np.nan).fillna(0)
     pos = dens[dens > 0]
@@ -3386,8 +3525,8 @@ def rule_trail_density_vydel(data: Data, res: Results, measure: dict, p: dict):
         # внутри локальных пятен высокой плотности и выбранных выделов.
         hot_polys, _, _ = _trail_hotspots(data, TRAIL_WINDOW_M, q)
         if hot_polys is not None and not hot_polys.empty:
-            clip_geom = unary_union(hot_polys.geometry.values).intersection(
-                unary_union(sel.geometry.values)
+            clip_geom = _safe_union(hot_polys.geometry.values).intersection(
+                _safe_union(sel.geometry.values)
             )
             trails_in = data.trails[data.trails.intersects(clip_geom)].copy()
             if not trails_in.empty:
@@ -3416,7 +3555,7 @@ def rule_trail_hotspot(data: Data, res: Results, measure: dict, p: dict):
                             f"{h['patch_ha']:.2f} га ({100 * h['share']:.0f}% полигона)", round(h["patch_ha"], 2))
     if not hit.empty:
         sel = target[target["uid"].isin(hit["uid"])]
-        pieces = polys[polys.intersects(unary_union(sel.geometry.values))]
+        pieces = polys[polys.intersects(_safe_union(sel.geometry.values))]
         res.add_evidence(pieces, measure["name"],
                          "зоны повышенной плотности троп (верхний квартиль)" if abs(p["quantile"] - 0.75) < 1e-9
                          else f"зоны повышенной плотности троп ({_qtag(p['quantile'])})")
@@ -3431,7 +3570,7 @@ def rule_shore_trails(data: Data, res: Results, measure: dict, p: dict):
         return
     dist = p["dist"]
     parts = [g.geometry for g in (data.hydro_lines, data.hydro_polys) if g is not None]
-    water = unary_union(pd.concat(parts).values)
+    water = _safe_union(pd.concat(parts).values)
     shore = water.buffer(dist).difference(water) if water.area > 0 else water.buffer(dist)
     hot_shore = polys[polys.intersects(shore)].copy()
     hot_shore["geometry"] = hot_shore.geometry.intersection(shore)
@@ -3538,7 +3677,7 @@ def _sdm_monitoring(data: Data, res: Results, measure: dict, p: dict, rasters, l
     m2 = dict(measure)
     m2["name"] = measure["name"] + " — мониторинг (SDM ≥ %.2f)" % thr
     target = _target(data, p)
-    j = gpd.overlay(sdm, target[["uid", "area_ha", "geometry"]], how="intersection")
+    j = _safe_overlay(sdm, target[["uid", "area_ha", "geometry"]], how="intersection")
     j["ha"] = j.area / 1e4
     share = spec_share(p)
     for uid, grp in j.groupby("uid"):
@@ -3573,7 +3712,7 @@ def rule_species(data: Data, res: Results, measure: dict, p: dict):
         res.add_evidence(j, measure["name"], f"{lab} — точки", "species")
         log.info("  точки: %d %s", j["uid"].nunique(), _units())
     if polys is not None:
-        j = gpd.overlay(polys, target[["uid", "geometry"]], how="intersection")
+        j = _safe_overlay(polys, target[["uid", "geometry"]], how="intersection")
         j["ha"] = j.area / 1e4
         for uid, grp in j.groupby("uid"):
             r = data.oozt[data.oozt["uid"] == uid].iloc[0]
@@ -3621,12 +3760,12 @@ def rule_species_trails(data: Data, res: Results, measure: dict, p: dict):
     if zones:
         z = gpd.GeoDataFrame(pd.concat(zones, ignore_index=True), crs=WORK_EPSG)
         if trails is not None:
-            zu = unary_union(z.geometry.values)
+            zu = _safe_union(z.geometry.values)
             t = trails[trails.intersects(zu)].copy()
             t["geometry"] = t.geometry.intersection(zu)
             t = t[~t.is_empty]
             if not t.empty:
-                j = gpd.overlay(t.explode(index_parts=False), target[["uid", "geometry"]], how="intersection",
+                j = _safe_overlay(t.explode(index_parts=False), target[["uid", "geometry"]], how="intersection",
                                 keep_geom_type=False)
                 j = j[j.geom_type.isin(["LineString", "MultiLineString"])]
                 j["len"] = j.length
@@ -3648,7 +3787,7 @@ def rule_species_trails(data: Data, res: Results, measure: dict, p: dict):
             res.add_evidence(polys, measure["name"], f"{lab} — полигоны", "species")
         else:
             # без троп — назначаем по самим зонам
-            j = gpd.overlay(z, target[["uid", "geometry"]], how="intersection")
+            j = _safe_overlay(z, target[["uid", "geometry"]], how="intersection")
             for uid, grp in j.groupby("uid"):
                 r = data.oozt[data.oozt["uid"] == uid].iloc[0]
                 res.add(r, measure, f"местообитания {lab_gen}: " + ", ".join(sorted(grp["species"].unique())[:8]))
@@ -3680,7 +3819,7 @@ def rule_slope(data: Data, res: Results, measure: dict, p: dict):
                 round(h["patch_ha"], 2))
     if not hit.empty:
         sel = target[target["uid"].isin(hit["uid"])]
-        pieces = polys[polys.intersects(unary_union(sel.geometry.values))]
+        pieces = polys[polys.intersects(_safe_union(sel.geometry.values))]
         res.add_evidence(pieces, measure["name"], f"уклон более {threshold_pct:g}% {eco_label}")
     log.info("  → %d %s (%d пятен)", len(hit), _units(), len(polys))
 
@@ -3728,7 +3867,7 @@ def rule_road_buffer(data: Data, res: Results, measure: dict, p: dict):
         near_idx = list(sidx.query(g.buffer(dmax), predicate="intersects"))
         if not near_idx:
             continue                                   # дороги дальше dmax — полосу не пересекает
-        near = unary_union([roads.geometry.values[i] for i in near_idx])
+        near = _safe_union([roads.geometry.values[i] for i in near_idx])
         if dmin > 0:
             inner = near.buffer(dmin)
             if inner.covers(g):
@@ -3782,7 +3921,7 @@ def rule_wetland(data: Data, res: Results, measure: dict, p: dict):
     if target is None or target.empty:
         return
     try:
-        j = gpd.overlay(target[["uid", "geometry"]], data.wetlands[["geometry"]],
+        j = _safe_overlay(target[["uid", "geometry"]], data.wetlands[["geometry"]],
                         how="intersection", keep_geom_type=True)
     except Exception as e:
         log.error("  оверлей с болотами: %s", e)
@@ -3916,7 +4055,7 @@ def rule_kolokolchik(data: Data, res: Results, measure: dict, p: dict):
     roads = _paved_roads(data)
     strip = None
     if roads is not None and not roads.empty:
-        strip = unary_union(roads.geometry.values).buffer(rd)
+        strip = _safe_union(roads.geometry.values).buffer(rd)
     else:
         log.warning("  слой дорог с твёрдым покрытием не задан — полоса от дорог не учитывается")
     for _, r in target.iterrows():
@@ -4433,7 +4572,7 @@ def draw_kvartal(data: Data, evidence: gpd.GeoDataFrame | None, kv, oozt_name, o
     vyd = data.oozt[(data.oozt["KV"] == kv) & (data.oozt["OOZT"] == oozt_name)]
     if vyd.empty:
         return None
-    focus_geom = unary_union(vyd.geometry.values)
+    focus_geom = _safe_union(vyd.geometry.values)
     minx, miny, maxx, maxy = vyd.total_bounds
     pad = max((maxx - minx), (maxy - miny)) * 0.12 + 30
     ext = (minx - pad, maxx + pad, miny - pad, maxy + pad)
@@ -4543,7 +4682,7 @@ def draw_kvartal(data: Data, evidence: gpd.GeoDataFrame | None, kv, oozt_name, o
         handles.append(Patch(facecolor="none", edgecolor="#9AA0A6", label="прочие полигоны"))
     used_layers = []
     if evidence is not None and not evidence.empty:
-        kv_geom = unary_union(vyd.geometry.values)
+        kv_geom = _safe_union(vyd.geometry.values)
         ev = evidence[evidence.intersects(kv_geom.buffer(5))]
         for layer, grp in ev.groupby("layer"):
             color, kind = _slope_style(layer)
@@ -4590,7 +4729,7 @@ def draw_kvartal(data: Data, evidence: gpd.GeoDataFrame | None, kv, oozt_name, o
         neighbors = neighbors.iloc[0:0]
     import matplotlib.patheffects as pe
     for n_kv, ng in neighbors.groupby("KV"):
-        ngeom = unary_union(ng.geometry.values)
+        ngeom = _safe_union(ng.geometry.values)
         clipped = ngeom.intersection(map_box)
         if clipped.is_empty:
             continue
@@ -5957,7 +6096,7 @@ def run(cfg: Config):
                 sub = mlw[mlw["Мероприятие"] == nm]
                 if sub.empty:
                     continue
-                u = unary_union(g.geometry.buffer(0).values)
+                u = _safe_union(g.geometry.buffer(0).values)
                 z = sub.copy()
                 z["geometry"] = sub.geometry.intersection(u)
                 z = z[~z.is_empty & (z.area > 1)]
@@ -6111,7 +6250,42 @@ def run(cfg: Config):
     return table, rep
 
 
-def main():
+def _running_under_ipython() -> bool:
+    """Jupyter/IPython: sys.argv содержит аргументы ядра (-f kernel.json), их argparse не знает."""
+    try:
+        get_ipython()                     # noqa: F821 — определён только в IPython
+        return True
+    except NameError:
+        return False
+
+
+def _clean_argv() -> list[str]:
+    """Аргументы командной строки без имени программы и служебных аргументов ядра
+    Jupyter (ipykernel). Значения флагов (--config путь, --kv 1,2) сохраняются."""
+    argv = list(sys.argv[1:])              # без имени программы — как для argparse
+    if not _running_under_ipython():
+        return argv
+    value_flags = {"--config", "--kv", "--formats", "--update-table"}
+    bool_flags = {"--gui", "--no-basemap", "--no-split", "--save-config-only", "--report-only"}
+    out, i = [], 0
+    while i < len(argv):
+        a = argv[i]
+        if a in value_flags and i + 1 < len(argv):
+            out.extend([a, argv[i + 1]])
+            i += 2
+        elif a in bool_flags:
+            out.append(a)
+            i += 1
+        elif a.startswith("-f"):           # «-f /path/kernel.json» — файл ядра
+            i += 1
+            if i < len(argv) and not argv[i].startswith("-"):
+                i += 1
+        else:
+            i += 1
+    return out
+
+
+def _build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(description="Природоохранные мероприятия для ООЗТ: кварталы/выделы "
                                              "или слой экосистем с уникальным ID")
     ap.add_argument("--config", help="JSON-конфигурация (без диалогов)")
@@ -6128,12 +6302,11 @@ def main():
                     help="записать в таблицу мероприятий столбцы правил, справку и описания расчёта и выйти")
     ap.add_argument("--report-only", action="store_true",
                     help="не пересчитывать: построить отчёт по measures_long.csv и evidence.gpkg из out_dir")
-    args = ap.parse_args()
-    if args.update_table:
-        logging.basicConfig(level=logging.INFO, format="%(message)s")
-        print(update_measures_xlsx(args.update_table, Config.load(args.config) if args.config else None))
-        return
+    return ap
 
+
+def _apply_args(args, ap):
+    """Аргументы → конфигурация (окно выбора данных — если нет --config или задан --gui)."""
     if args.config and not args.gui:
         cfg = Config.load(args.config)
     else:
@@ -6149,6 +6322,14 @@ def main():
         bad = [x for x in cfg.report_formats if x not in REPORT_FORMATS]
         if bad:
             ap.error("неизвестные форматы: " + ", ".join(bad) + " (допустимы: docx, pdf, doc)")
+    return cfg
+
+
+def _run_with_args(args, ap):
+    if args.update_table:
+        print(update_measures_xlsx(args.update_table, Config.load(args.config) if args.config else None))
+        return
+    cfg = _apply_args(args, ap)
     if args.save_config_only:
         Path(cfg.out_dir).mkdir(parents=True, exist_ok=True)
         cfg.save(Path(cfg.out_dir) / "config.json")
@@ -6160,5 +6341,29 @@ def main():
     run(cfg)
 
 
-if __name__ == "__main__":
-    main()
+def main():
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)-5s %(message)s",
+                        datefmt="%H:%M:%S")
+    ap = _build_parser()
+    args = ap.parse_args(_clean_argv())
+    _run_with_args(args, ap)
+
+
+def _safe_main() -> int:
+    """main с перехватом ошибок: traceback в журнал, код 1 — вместо падения процесса."""
+    try:
+        main()
+        return 0
+    except SystemExit as e:
+        return int(e.code or 0)
+    except Exception:
+        log.exception("Ошибка выполнения")
+        return 1
+
+
+if __name__ == "__main__" and not _running_under_ipython():
+    sys.exit(_safe_main())
+elif __name__ == "__main__":
+    # Jupyter: всё определено (run, gui_collect_config, Data, Config…), автозапуска нет —
+    # запускайте из ячейки: cfg = Config.load("config.json"); run(cfg)  — или main()
+    print("Jupyter: автозапуск выключен — вызывайте run(cfg) или main() из ячейки")

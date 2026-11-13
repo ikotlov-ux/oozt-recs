@@ -159,6 +159,9 @@ python oozt_recs.py --config config_local.json --report-only
 # без подложки OSM
 python oozt_recs.py --config config_local.json --no-basemap
 
+# в Jupyter: вставьте весь файл в одну ячейку — автозапуска не будет; затем
+cfg = Config.load("config_local.json"); run(cfg)      # или main()
+
 # форматы отчёта (по умолчанию docx,pdf; doc — Word 97–2003; пусто — только Markdown)
 python oozt_recs.py --config config_local.json --report-only --formats docx,pdf,doc
 ```
