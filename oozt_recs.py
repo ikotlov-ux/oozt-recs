@@ -300,7 +300,7 @@ UNIT_MODES = {
 
 # кандидаты для автоподбора поля номера квартала в слое квартальной сети
 KVNET_KV_CANDIDATES = ["KV", "Квартал", "kv", "kvartal", "kvartal_no", "Kvartal", "квартал",
-                       "nom_kv", "Номер квартала", "quarter", "FID_kv"]
+                       "nom_kv", "Номер квартала", "quarter", "kv_num", "num_kv", "FID_kv"]
 
 
 @dataclass
