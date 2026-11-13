@@ -6251,12 +6251,14 @@ def run(cfg: Config):
 
 
 def _running_under_ipython() -> bool:
-    """Jupyter/IPython: sys.argv содержит аргументы ядра (-f kernel.json), их argparse не знает."""
+    """Ячейка Jupyter (код вставлен в ноутбук): get_ipython есть, а sys.argv —
+    аргументы ядра (ipykernel_launcher). При %run sys.argv — путь к скрипту:
+    это обычный запуск, автозапуск срабатывает."""
     try:
         get_ipython()                     # noqa: F821 — определён только в IPython
-        return True
     except NameError:
         return False
+    return "ipykernel" in str(sys.argv[0])
 
 
 def _clean_argv() -> list[str]:
@@ -6364,6 +6366,14 @@ def _safe_main() -> int:
 if __name__ == "__main__" and not _running_under_ipython():
     sys.exit(_safe_main())
 elif __name__ == "__main__":
-    # Jupyter: всё определено (run, gui_collect_config, Data, Config…), автозапуска нет —
-    # запускайте из ячейки: cfg = Config.load("config.json"); run(cfg)  — или main()
-    print("Jupyter: автозапуск выключен — вызывайте run(cfg) или main() из ячейки")
+    # Код вставлен в ячейку Jupyter: всё определено, автозапуска нет.
+    # Подсказываем готовые команды с найденными конфигами в текущей папке.
+    _cfgs = [p.name for p in Path.cwd().glob("config*.json") if p.name != "config.example.json"]
+    print("Код oozt_recs.py загружен (Jupyter, автозапуск выключен). Запуск из ячейки:")
+    if _cfgs:
+        for _c in sorted(_cfgs)[:3]:
+            print(f'    cfg = Config.load("{_c}"); run(cfg)')
+        print("  или полный запуск с окном выбора данных: main()")
+    else:
+        print('    cfg = Config.load("config.json"); run(cfg)   # подставьте свой конфиг')
+        print("    или полный запуск с окном выбора данных: main()")
