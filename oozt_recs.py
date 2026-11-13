@@ -664,7 +664,9 @@ def _type_word_match(kw: str, t_words: list[str]) -> bool:
     """Слово ключа совпадает со словом типа: по стемам TYPE_WORDS (луг ~ луга, луговые)
     либо по общему началу не короче 4 символов (естественные ~ естественных)."""
     stem = next((s for s, _ in TYPE_WORDS if s in kw), None)
-    if stem is not None and any(stem in w for w in t_words):
+    # «нелесные» не должны попадать в «лесные»: слово с приставкой «не» не матчится по стему
+    if stem is not None and any(stem in w and not (w.startswith("не") and stem in w[2:])
+                                for w in t_words):
         return True
     n = max(4, len(kw))
     return any(w.startswith(kw[:n]) or (len(w) >= 4 and kw.startswith(w)) for w in t_words)
