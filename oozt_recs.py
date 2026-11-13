@@ -3051,8 +3051,10 @@ class Data:
                            f"(задайте kvnet_field)")
         kv["KV"] = kv[kf].astype(str).str.strip()
         ko = cfg.kvnet_oozt_field
-        kv["KVOOZT"] = (kv[ko].astype(str).str.strip() if ko and ko in kv.columns else "").replace(
-            {"nan": "", "None": ""})
+        if ko and ko in kv.columns:
+            kv["KVOOZT"] = kv[ko].astype(str).str.strip().replace({"nan": "", "None": ""})
+        else:
+            kv["KVOOZT"] = ""
         kv = kv[["KV", "KVOOZT", "geometry"]].copy()
         kv = repair_geometries(kv)
         kv = kv.dissolve(by=["KV", "KVOOZT"], as_index=False)   # многочастный квартал → один полигон
