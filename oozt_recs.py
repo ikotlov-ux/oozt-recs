@@ -959,6 +959,11 @@ def measure_spec(measure: dict) -> dict:
             p[k], src[k] = None, "окно скрипта"
         else:
             p[k], src[k] = d, "по умолчанию"
+    if rule == "wetland":
+        # болота задаёт сам вектор: мероприятие назначается любому полигону,
+        # пересекающему слой болот — столбец «Типы полигонов» не ограничивает
+        p.pop("types", None)
+        src.pop("types", None)
     return dict(rule=rule, p=p, src=src, origin=origin, errors=errors, reason="")
 
 
@@ -3301,6 +3306,7 @@ class Results:
                 return
         self.rows.append({
             "ООЗТ": vydel_row["OOZT"], "Квартал": vydel_row["KV"], "Выдел": vydel_row["VYD"],
+            "uid": vydel_row.get("uid"),
             "_sort": vydel_row.get("KV_SORT", vydel_row["KV"]),
             "_vsort": vydel_row.get("VYD_SORT", 0),
             "Тип выдела": vydel_row["Type"], "Экосистема": vydel_row["Name"],
@@ -3933,6 +3939,9 @@ def rule_wetland(data: Data, res: Results, measure: dict, p: dict):
     if j.empty:
         return
     j["_ha"] = j.area / 1e4
+    j = j[j["_ha"] >= 0.01]          # касания с нулевой площадью не считаются болотом
+    if j.empty:
+        return
     for uid, grp in j.groupby("uid"):
         r = data.oozt[data.oozt["uid"] == uid].iloc[0]
         ha = float(grp["_ha"].sum())
@@ -4810,6 +4819,22 @@ def md_table(df: pd.DataFrame, cols: list[str]) -> str:
     return "\n".join(lines)
 
 
+def units_table(data: Data, res: Results) -> pd.DataFrame:
+    """Выделы (полигоны), которым назначены мероприятия, с их площадями.
+    Основа сводок «по ООЗТ в целом»: количество и суммарная площадь участков работ."""
+    cols = ["ООЗТ", "Квартал", "Выдел", "uid", "Мероприятие", "Площадь, га"]
+    if not res.rows:
+        return pd.DataFrame(columns=cols)
+    df = pd.DataFrame(res.rows)
+    if "uid" not in df.columns or df["uid"].isna().all():
+        df["uid"] = (df["ООЗТ"].astype(str) + "|" + df["Квартал"].astype(str)
+                     + "|" + df["Выдел"].astype(str))
+    df = df.drop_duplicates(["uid", "Мероприятие"])
+    areas = dict(zip(data.oozt["uid"], data.oozt["area_ha"]))
+    df["Площадь, га"] = df["uid"].map(areas).astype(float).round(2)
+    return df[cols].reset_index(drop=True)
+
+
 def _report_groups_table(data: Data, kv_list) -> pd.DataFrame:
     """Список групп отчёта (кварталов / листов / групп) в порядке KV_SORT с учётом фильтра."""
     kv_all = (data.oozt[["OOZT", "KV", "KV_SORT"]].drop_duplicates(["OOZT", "KV"])
@@ -4938,7 +4963,7 @@ def execution_list(table: pd.DataFrame, cfg: Config, data: "Data | None" = None)
 
 
 def _report_blocks(data: Data, table: pd.DataFrame, evidence, rep: Path, kv_all: pd.DataFrame,
-                   basemap=True, draw=True) -> list:
+                   basemap=True, draw=True, units: pd.DataFrame | None = None) -> list:
     """Содержание отчёта в нейтральном виде; из него собираются MD, DOCX и PDF.
     Блоки: ("title", t) ("h", level, t) ("p", t) ("note", t) ("img", path) ("break",)
            ("table", header, rows, widths_cm, font_pt)"""
@@ -4962,11 +4987,35 @@ def _report_blocks(data: Data, table: pd.DataFrame, evidence, rep: Path, kv_all:
          ("p", _params_line())]
     s = lambda v: "" if pd.isna(v) else str(v)
     if not table.empty:
+        B.append(("h", 1, "Сводка по мероприятиям"))
+        # сводки по каждому ООЗТ в целом: количество и площади мероприятий
+        u = units if units is not None and not units.empty else None
+        for oo in (kv_all["OOZT"].astype(str).unique() if not kv_all.empty
+                   else table["ООЗТ"].astype(str).unique()):
+            sub = table[table["ООЗТ"].astype(str) == str(oo)]
+            terr = data.oozt[data.oozt["OOZT"].astype(str) == str(oo)]
+            area_all = float(terr["area_ha"].sum()) if not terr.empty else 0.0
+            n_kv = int(terr["KV"].nunique()) if not terr.empty else 0
+            n_kv_m = int(sub["Квартал"].nunique()) if not sub.empty else 0
+            txt = (f"{oo}: {L['groups_n'].lower()} — {n_kv}, территория — {area_all:.0f} га; "
+                   f"с мероприятиями — {n_kv_m} из {n_kv}; всего назначений — {len(sub)}")
+            if u is not None:
+                uu = u[u["ООЗТ"].astype(str) == str(oo)]
+                area_m = float(uu.drop_duplicates("uid")["Площадь, га"].sum()) if not uu.empty else 0.0
+                txt += (f"; площадь участков работ — {area_m:.0f} га "
+                        f"({100 * area_m / max(area_all, 1e-9):.0f}% территории)")
+            B.append(("p", txt))
         summ = _summary_table(table, L)
         hdr = ["Тип мероприятий", "Мероприятие",
                L["units_n"] if "Выдел" in table.columns else "Назначений", L["groups_n"]]
-        B += [("h", 1, "Сводка по мероприятиям"),
-              ("table", hdr, [[s(r[c]) for c in hdr] for _, r in summ.iterrows()], [5.0, 15.7, 3.0, 3.0], 9)]
+        widths = [5.0, 15.7, 3.0, 3.0]
+        if u is not None:
+            ar = u.groupby("Мероприятие")["Площадь, га"].sum().round(1)
+            summ = summ.copy()
+            summ["Площадь участков, га"] = summ["Мероприятие"].map(ar).fillna(0.0)
+            hdr.append("Площадь участков, га")
+            widths = [4.4, 12.9, 2.4, 2.4, 4.6]
+        B.append(("table", hdr, [[s(r[c]) for c in hdr] for _, r in summ.iterrows()], widths, 9))
     rt = rules_table(getattr(data, "measures", None), table, cfg)
     if not rt.empty:
         hdr2 = ["Код", "Мероприятие", "Метод выявления (из таблицы)", "Правило", "Как рассчитано скриптом",
@@ -5569,13 +5618,13 @@ def _write_report_files(blocks: list, rep: Path, title: str, formats) -> dict:
 
 
 def build_report(data: Data, table: pd.DataFrame, evidence, out_dir: Path, kv_list, basemap=True,
-                 formats=("docx", "pdf")):
+                 formats=("docx", "pdf"), units: pd.DataFrame | None = None):
     enable_win_dll_path()
     cfg = data.cfg
     rep = out_dir / "report"
     rep.mkdir(parents=True, exist_ok=True)
     kv_all = _report_groups_table(data, kv_list)
-    blocks = _report_blocks(data, table, evidence, rep, kv_all, basemap=basemap)
+    blocks = _report_blocks(data, table, evidence, rep, kv_all, basemap=basemap, units=units)
     title = blocks[0][1]
     made = _write_report_files(blocks, rep, title, formats)
     return made.get("pdf") or made.get("docx") or made["md"]
@@ -5900,8 +5949,15 @@ def report_only(cfg: Config):
             g = gpd.read_file(gpkg, layer=ly)
             parts.append(g.to_crs(WORK_EPSG))
     ev = gpd.GeoDataFrame(pd.concat(parts, ignore_index=True), crs=WORK_EPSG) if parts else None
+    units = None
+    up = out / "units_long.csv"
+    if up.exists():
+        try:
+            units = pd.read_csv(up, encoding="utf-8-sig")
+        except Exception as e:
+            log.warning("units_long.csv не прочитан — сводка площадей в отчёте пропущена: %s", e)
     rep = build_report(data, table, ev, out, cfg.report_kv, basemap=cfg.basemap,
-                       formats=cfg.report_formats)
+                       formats=cfg.report_formats, units=units)
     log.info("Готово. Отчёт: %s", rep)
 
 
@@ -5949,6 +6005,8 @@ def run(cfg: Config):
             table = pd.DataFrame(columns=["ООЗТ", "Квартал", "Выдел", "Тип выдела", "Экосистема", "Тип мероприятий",
                                           "Мероприятие", "Тип экосистемы мероприятия", "Пункт Приказа",
                                           "Сезонность", "Основание", "Значение"])
+    units = units_table(data, res)
+    units.to_csv(out / "units_long.csv", index=False, encoding="utf-8-sig")
     disp = display_columns(cfg)
     table.rename(columns=disp).to_csv(out / "measures_long.csv", index=False, encoding="utf-8-sig")
     try:
@@ -6249,7 +6307,7 @@ def run(cfg: Config):
         log.warning("GPKG не записан: %s", e)
 
     rep = build_report(data, table, ev, out, cfg.report_kv, basemap=cfg.basemap,
-                       formats=cfg.report_formats)
+                       formats=cfg.report_formats, units=units)
     log.info("Готово. Таблица: %s; отчёт: %s", out / "measures_long.xlsx", rep)
     return table, rep
 
