@@ -2820,8 +2820,21 @@ def read_lesopat(path: str) -> gpd.GeoDataFrame | None:
     ccat = next((c for c in g.columns if c != "geometry" and str(c).lower().replace("ё", "е")
                  in ("категория", "cat", "category")), None)
     if not ccat:
-        log.warning("Лесопатология %s: нет поля «Категория» — слой не использован", Path(p).name)
-        return None
+        # нет поля «Категория»: классифицируем текст рекомендаций (как в Excel)
+        crec = next((c for c in g.columns if c != "geometry" and "рекоменд" in str(c).lower()), None)
+        if not crec:
+            log.warning("Лесопатология %s: нет поля «Категория» или «Рекомендации» — слой не использован",
+                        Path(p).name)
+            return None
+        rows = []
+        for _, r in g.iterrows():
+            for cat in classify_lesopat_recs(r.get(crec)):
+                rows.append({"cat": cat, "geometry": r.geometry})
+        if not rows:
+            log.warning("Лесопатология %s: рекомендации не распознаны — слой не использован",
+                        Path(p).name)
+            return None
+        return gpd.GeoDataFrame(rows, crs=g.crs or WORK_EPSG).to_crs(WORK_EPSG)
     out = g.rename(columns={ccat: "cat"})[["cat", "geometry"]]
     out["pvn"], out["kv"], out["vyd"] = "", "", ""
     cpvn = next((c for c in g.columns if c != "geometry" and "пвн" in str(c).lower()), None)
@@ -3235,12 +3248,18 @@ class Data:
                 log.error("Лесопатология %s: %s", Path(pth).name, e)
                 continue
             if g is not None and not g.empty:
-                g = g[g.geometry.within(self.clip)]
-                if not g.empty:
-                    layers.append(g)
+                layers.append(g)
         if not layers:
             return None
         g = gpd.GeoDataFrame(pd.concat(layers, ignore_index=True), crs=WORK_EPSG)
+        if self.clip is not None and not g.empty:
+            n_all = len(g)
+            # допуск 20 м: точки на границе ООЗТ (ПВН ставится по границе выдела)
+            # не отбрасываются молча — предупреждаем, если что-то отфильтровано
+            g = g[g.geometry.within(self.clip.buffer(20))]
+            if len(g) < n_all:
+                log.warning("Лесопатология: %d из %d точек вне территории (допуск 20 м) — не использованы",
+                            n_all - len(g), n_all)
         log.info("Лесопатология: %d точек ПВН (%s)", len(g),
                  ", ".join(f"{c}: {n}" for c, n in g["cat"].value_counts().items()))
         return g
@@ -3997,7 +4016,21 @@ def rule_points_category(data: Data, res: Results, measure: dict, p: dict):
     target = _target(data, p)
     if target is None or target.empty:
         return
-    j = gpd.sjoin(pts, target[["uid", "geometry"]], how="inner", predicate="within")
+    j = gpd.sjoin(pts, target[["uid", "geometry"]], how="left", predicate="within")
+    # точки в «дырах» между полигонами: ближайший полигон в пределах 50 м
+    miss = j[j["uid"].isna()]
+    if not miss.empty and len(target):
+        try:
+            pairs = target.sindex.nearest(miss.geometry.values, max_distance=50,
+                                           return_distance=True)
+            inp, tree, dist = pairs
+            for i, t in zip(inp, tree):
+                j.at[miss.index[i], "uid"] = target.iloc[t]["uid"]
+        except Exception as e:
+            log.warning("  ближайший полигон для %d точек не найден: %s", len(miss), e)
+    j = j[j["uid"].notna()]
+    if j.empty:
+        return
     for uid, grp in j.groupby("uid"):
         r = data.oozt[data.oozt["uid"] == uid].iloc[0]
         ids = ", ".join(dict.fromkeys(x for x in grp["pvn"] if x and x not in ("nan", "None")))
@@ -4415,6 +4448,13 @@ def _pattern_style(layer: str):
         return ("#7f7f7f", "poly")
     if t.startswith("зоны повышенной плотности троп"):
         return ("#ff7f0e", "poly")
+    if t.startswith("лесопатология"):
+        for k, v in (("санитарная рубка", "#d62728"), ("рубки ухода", "#8c564b"),
+                     ("надзор", "#1f77b4"), ("посадка", "#2ca02c"),
+                     ("эталон", "#9467bd"), ("биотехния", "#e377c2")):
+            if k in t:
+                return (v, "point")
+        return ("#8c564b", "point")
     if "— точки" in t:
         return ("#e377c2" if inv else "#2ca02c" if ("охран" in t or "редк" in t) else "#000000", "point")
     if "— полигоны" in t or "виды" in t or "видов" in t:
@@ -4700,7 +4740,8 @@ def draw_kvartal(data: Data, evidence: gpd.GeoDataFrame | None, kv, oozt_name, o
         for layer, grp in ev.groupby("layer"):
             color, kind = _slope_style(layer)
             if kind == "point":
-                species_point = layer in ("редкие виды — точки", "инвазионные виды — точки")
+                species_point = layer in ("редкие виды — точки", "инвазионные виды — точки",
+                                         "Corvus — точки") or layer.startswith("лесопатология")
                 point_size = 60 if species_point else 40
                 legend_size = 13.5 if species_point else 9
                 grp.plot(ax=ax, color=color, markersize=point_size,
