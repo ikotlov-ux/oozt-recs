@@ -5133,6 +5133,8 @@ def _pattern_style(layer: str):
         return ("#33a02c", "outline")
     if "участки лесопатологических мероприятий" in t:
         return ("#8c564b", "outline")
+    if "участки проведения мероприятия" in t:
+        return ("#d95f02", "poly")
     if t.startswith("участки работ ("):
         if "луг" in t:
             return ("#d9a404", "poly")
@@ -5273,10 +5275,11 @@ def _legend_label(layer: str) -> str:
     return s
 
 
-def _place_labels(ax, items, sizes=(11, 10, 9, 8, 7), leaders=True, max_labels=150):
-    """Подписи полигонов без наложений.
+def _place_labels(ax, items, sizes=(11, 10, 9, 8, 7), leaders=True, max_labels=150, reserved=None):
+    """Подписи полигонов и точек без наложений.
     items: [(текст, геометрия)] в порядке приоритета. Подпись ставится внутрь полигона, если помещается
-    (перебор кеглей sizes); иначе — рядом с полигоном с выноской; если и так не помещается — пропускается.
+    (перебор кеглей sizes); иначе — рядом с объектом с выноской; если и так не помещается — пропускается.
+    reserved: список уже занятых областей (геометрии shapely или кортежи (cx, cy, text, fs)).
     Возвращает число размещённых подписей."""
     import matplotlib.patheffects as pe
     from shapely.geometry import box as _box
@@ -5294,6 +5297,13 @@ def _place_labels(ax, items, sizes=(11, 10, 9, 8, 7), leaders=True, max_labels=1
         hw = (len(t) * fs * 0.62 + 3) * m_per_pt / 2
         hh = (fs * 1.05 + 2) * m_per_pt / 2
         return _box(cx - hw, cy - hh, cx + hw, cy + hh)
+
+    if reserved:
+        for r in reserved:
+            if isinstance(r, tuple) and len(r) == 4:
+                placed.append(lbl_box(r[0], r[1], str(r[2]), float(r[3])))
+            elif r is not None and not getattr(r, "is_empty", True):
+                placed.append(r)
 
     def free(b):
         return frame.contains(b) and not any(b.intersects(q) for q in placed)
@@ -5320,11 +5330,16 @@ def _place_labels(ax, items, sizes=(11, 10, 9, 8, 7), leaders=True, max_labels=1
         b0 = lbl_box(0, 0, t, fs)
         bw, bh = b0.bounds[2] - b0.bounds[0], b0.bounds[3] - b0.bounds[1]
         off = 6 * m_per_pt
-        cands = [(gx1 + off + bw / 2, (gy0 + gy1) / 2), (gx0 - off - bw / 2, (gy0 + gy1) / 2),
-                 ((gx0 + gx1) / 2, gy1 + off + bh / 2), ((gx0 + gx1) / 2, gy0 - off - bh / 2),
-                 (gx1 + off + bw / 2, gy1 + off + bh / 2), (gx0 - off - bw / 2, gy1 + off + bh / 2),
-                 (gx1 + off + bw / 2, gy0 - off - bh / 2), (gx0 - off - bw / 2, gy0 - off - bh / 2),
-                 (gx1 + 3 * off + bw / 2, (gy0 + gy1) / 2), (gx0 - 3 * off - bw / 2, (gy0 + gy1) / 2)]
+        mx, my = (gx0 + gx1) / 2, (gy0 + gy1) / 2
+        cands = []
+        for mult in (1.0, 2.4, 4.0, 6.0):
+            dx, dy = mult * off + bw / 2, mult * off + bh / 2
+            cands.extend([
+                (gx1 + dx, my), (gx0 - dx, my),
+                (mx, gy1 + dy), (mx, gy0 - dy),
+                (gx1 + dx, gy1 + dy), (gx0 - dx, gy1 + dy),
+                (gx1 + dx, gy0 - dy), (gx0 - dx, gy0 - dy),
+            ])
         for cx, cy in cands:
             b = lbl_box(cx, cy, t, fs)
             if free(b):
@@ -5386,11 +5401,9 @@ def _plot_evidence_group(ax, handles: list, layer: str, grp: gpd.GeoDataFrame, o
         handles.append(Patch(facecolor=color, alpha=0.55, edgecolor=color, label=lbl))
 
 
-def draw_oozt(data: Data, evidence: gpd.GeoDataFrame | None, oozt_name: str, out_png: Path,
-               basemap=True):
-    """Обзорная схема на одно ООЗТ в проекции UTM Zone 37N (EPSG:32637, масштаб 1:1 без сжатия):
-    границы всех кварталов с номерами и географически очерченные участки проведения мероприятий."""
-    import matplotlib.patheffects as pe
+def _oozt_map_ctx(data: Data, oozt_name: str) -> dict | None:
+    """Предрасчёт контура ООЗТ, экстента UTM 37N, кварталов и подрезанных базовых слоёв
+    для быстрой отрисовки общей обзорной схемы и всех частных схем по мероприятиям."""
     same = data.oozt[data.oozt["OOZT"].astype(str) == str(oozt_name)]
     kn = getattr(data, "kvnet", None)
     kn_same = None
@@ -5409,25 +5422,11 @@ def draw_oozt(data: Data, evidence: gpd.GeoDataFrame | None, oozt_name: str, out
     geom = _safe_union(gparts)
     minx, miny, maxx, maxy = geom.bounds
     pad = max(maxx - minx, maxy - miny) * 0.06 + 40
-    ext = (minx - pad, maxx + pad, miny - pad, maxy + pad)
+    ext = (minx - pad, maxx + pad, miny - pad * 1.35, maxy + pad)
     w, h = ext[1] - ext[0], ext[3] - ext[2]
     fig_w, fig_h = _utm_figsize(w, h)
-    fig, ax = plt.subplots(figsize=(fig_w, fig_h), dpi=200)
-    ax.set_aspect("equal", adjustable="box")
-    ax.set_xlim(ext[0], ext[1])
-    ax.set_ylim(ext[2], ext[3])
-    u = geom
-    handles = []
-    if data.hydro_polys is not None and not data.hydro_polys.empty:
-        hp = gpd.clip(data.hydro_polys, u)
-        if not hp.empty:
-            hp.plot(ax=ax, color="#A6CEE3", edgecolor="none", alpha=0.85, zorder=2)
-            handles.append(Patch(facecolor="#A6CEE3", alpha=0.9, edgecolor="none", label="озёра и пруды"))
-    if data.hydro_lines is not None and not data.hydro_lines.empty:
-        hl = gpd.clip(data.hydro_lines, u)
-        if not hl.empty:
-            hl.plot(ax=ax, color="#1F78B4", linewidth=0.9, alpha=0.9, zorder=2.5)
-            handles.append(Line2D([], [], color="#1F78B4", linewidth=1.6, label="реки и канавы"))
+    hp = gpd.clip(data.hydro_polys, geom) if (data.hydro_polys is not None and not data.hydro_polys.empty) else None
+    hl = gpd.clip(data.hydro_lines, geom) if (data.hydro_lines is not None and not data.hydro_lines.empty) else None
     paved = _paved_roads(data)
     dirt = None
     if data.roads_dirt is not None and not data.roads_dirt.empty:
@@ -5437,38 +5436,9 @@ def draw_oozt(data: Data, evidence: gpd.GeoDataFrame | None, oozt_name: str, out
         dirt = data.trails[~data.trails.index.isin(paved.index)]
     elif data.trails is not None and not data.trails.empty:
         dirt = data.trails
-    if dirt is not None and not dirt.empty:
-        tl = gpd.clip(dirt, u)
-        if not tl.empty:
-            tl.plot(ax=ax, color="#b5b5b5", linewidth=0.4, alpha=0.7, zorder=3.4)
-            handles.append(Line2D([], [], color="#b5b5b5", linewidth=1.0, label="грунтовые дороги и тропы"))
-    if data.trails_informal is not None and not data.trails_informal.empty:
-        it = gpd.clip(data.trails_informal, u)
-        if not it.empty:
-            it.plot(ax=ax, color="#c98d5a", linewidth=0.65, alpha=0.85, zorder=3.5)
-            handles.append(Line2D([], [], color="#c98d5a", linewidth=1.2, label="стихийные тропы OSM"))
-    if paved is not None and not paved.empty:
-        pv = gpd.clip(paved, u)
-        if not pv.empty:
-            pv.plot(ax=ax, color="#5f6368", linewidth=1.35, zorder=3.8)
-            handles.append(Line2D([], [], color="#5f6368", linewidth=2.0, label="дороги с твёрдым покрытием"))
-    if evidence is not None and not evidence.empty:
-        is_pt = evidence.geom_type.isin(["Point", "MultiPoint"])
-        has_oo = ("oozt" in evidence.columns
-                  and evidence["oozt"].fillna("").astype(str).str.strip().ne(""))
-        ev_pts = evidence[is_pt & (
-            (has_oo & (evidence["oozt"].astype(str) == str(oozt_name)))
-            | (~has_oo & evidence.intersects(geom.buffer(5)))
-        )].copy()
-        ev_nonpt = evidence[~is_pt & evidence.intersects(geom.buffer(1))].copy()
-        if not ev_nonpt.empty:
-            ev_nonpt = gpd.clip(ev_nonpt, geom.buffer(0.5))
-        ev_parts = [x for x in (ev_nonpt, ev_pts) if x is not None and not x.empty]
-        if ev_parts:
-            ev_plot = gpd.GeoDataFrame(pd.concat(ev_parts, ignore_index=True), crs=WORK_EPSG)
-            for layer, grp in ev_plot.groupby("layer"):
-                _plot_evidence_group(ax, handles, layer, grp, overview=True)
-    # границы всех кварталов данного ООЗТ (включая пустые кварталы из сети) и их номера
+    tl = gpd.clip(dirt, geom) if (dirt is not None and not dirt.empty) else None
+    it = gpd.clip(data.trails_informal, geom) if (data.trails_informal is not None and not data.trails_informal.empty) else None
+    pv = gpd.clip(paved, geom) if (paved is not None and not paved.empty) else None
     q_rows = []
     if kn_same is not None and not kn_same.empty and data.cfg.unit_mode != "eco":
         for kv_id, kg in kn_same.groupby("KV"):
@@ -5487,39 +5457,196 @@ def draw_oozt(data: Data, evidence: gpd.GeoDataFrame | None, oozt_name: str, out
                     kv_s = str(kv_id).removesuffix(".0")
                     if kv_s not in seen_kv:
                         q_rows.append((kv_s, _safe_union(kg.geometry.values)))
+    return dict(geom=geom, ext=ext, w=w, h=h, fig_w=fig_w, fig_h=fig_h,
+                hp=hp, hl=hl, tl=tl, it=it, pv=pv, q_rows=q_rows, basemap_cache=None)
+
+
+def _measure_fig_name(oozt_name: str, idx: int, code: str, measure_name: str) -> str:
+    """Короткое безопасное имя PNG-файла для частной схемы мероприятия (под Windows MAX_PATH)."""
+    oo_s = re.sub(r"\W+", "_", str(oozt_name)).strip("_")[:26] or "oozt"
+    cd_s = re.sub(r"\W+", "_", str(code)).strip("_")[:8]
+    nm_s = re.sub(r"\W+", "_", str(measure_name)).strip("_")[:34] or "measure"
+    mid = f"{cd_s}_{nm_s}" if cd_s else nm_s
+    return f"fig_{oo_s}_m{idx:02d}_{mid}.png"
+
+
+def draw_oozt(data: Data, evidence: gpd.GeoDataFrame | None, oozt_name: str, out_png: Path,
+               basemap=True, ctx: dict | None = None, measure_name: str | None = None,
+               measure_code: str = "", active_kvs: set[str] | None = None,
+               work_geoms: list | None = None):
+    """Схема на одно ООЗТ в проекции UTM Zone 37N (EPSG:32637, масштаб 1:1 без сжатия):
+    при measure_name=None — общая обзорная схема по всем мероприятиям;
+    при заданном measure_name — частная схема конкретного мероприятия с выделением кварталов и участков работ."""
+    import textwrap
+    import matplotlib.patheffects as pe
+    if ctx is None:
+        ctx = _oozt_map_ctx(data, oozt_name)
+    if ctx is None:
+        return None
+    geom, ext, w, h = ctx["geom"], ctx["ext"], ctx["w"], ctx["h"]
+    fig_w, fig_h = ctx["fig_w"], ctx["fig_h"]
+    fig, ax = plt.subplots(figsize=(fig_w, fig_h), dpi=200)
+    ax.set_aspect("equal", adjustable="box")
+    ax.set_xlim(ext[0], ext[1])
+    ax.set_ylim(ext[2], ext[3])
+    handles = []
+    if ctx["hp"] is not None and not ctx["hp"].empty:
+        ctx["hp"].plot(ax=ax, color="#A6CEE3", edgecolor="none", alpha=0.85, zorder=2)
+        handles.append(Patch(facecolor="#A6CEE3", alpha=0.9, edgecolor="none", label="озёра и пруды"))
+    if ctx["hl"] is not None and not ctx["hl"].empty:
+        ctx["hl"].plot(ax=ax, color="#1F78B4", linewidth=0.9, alpha=0.9, zorder=2.5)
+        handles.append(Line2D([], [], color="#1F78B4", linewidth=1.6, label="реки и канавы"))
+    if ctx["tl"] is not None and not ctx["tl"].empty:
+        ctx["tl"].plot(ax=ax, color="#b5b5b5", linewidth=0.4, alpha=0.7, zorder=3.4)
+        handles.append(Line2D([], [], color="#b5b5b5", linewidth=1.0, label="грунтовые дороги и тропы"))
+    if ctx["it"] is not None and not ctx["it"].empty:
+        ctx["it"].plot(ax=ax, color="#c98d5a", linewidth=0.65, alpha=0.85, zorder=3.5)
+        handles.append(Line2D([], [], color="#c98d5a", linewidth=1.2, label="стихийные тропы OSM"))
+    if ctx["pv"] is not None and not ctx["pv"].empty:
+        ctx["pv"].plot(ax=ax, color="#5f6368", linewidth=1.35, zorder=3.8)
+        handles.append(Line2D([], [], color="#5f6368", linewidth=2.0, label="дороги с твёрдым покрытием"))
+    ev_src = evidence
+    if measure_name is not None and ev_src is not None and not ev_src.empty:
+        ev_src = ev_src[ev_src["measure"].astype(str) == str(measure_name)]
+    pvn_lab_items = []
+    reserved_boxes: list = []
+    has_poly_ev = False
+    if ev_src is not None and not ev_src.empty:
+        is_pt = ev_src.geom_type.isin(["Point", "MultiPoint"])
+        has_oo = ("oozt" in ev_src.columns
+                  and ev_src["oozt"].fillna("").astype(str).str.strip().ne(""))
+        ev_pts = ev_src[is_pt & (
+            (has_oo & (ev_src["oozt"].astype(str) == str(oozt_name)))
+            | (~has_oo & ev_src.intersects(geom.buffer(5)))
+        )].copy()
+        if not ev_pts.empty:
+            pt_lbl = ev_pts["label"].fillna("").astype(str) if "label" in ev_pts.columns else ""
+            pt_c = ev_pts.geometry.centroid
+            ev_pts["_dedup_k"] = (
+                ev_pts["layer"].astype(str) + "|" + pt_lbl + "|"
+                + pt_c.x.round(1).astype(str) + "|" + pt_c.y.round(1).astype(str)
+            )
+            ev_pts = ev_pts.drop_duplicates("_dedup_k").drop(columns=["_dedup_k"])
+        ev_nonpt = ev_src[~is_pt & ev_src.intersects(geom.buffer(1))].copy()
+        if not ev_nonpt.empty:
+            ev_nonpt = gpd.clip(ev_nonpt, geom.buffer(0.5))
+            has_poly_ev = bool(ev_nonpt.geom_type.isin(["Polygon", "MultiPolygon"]).any())
+        if measure_name is not None and not has_poly_ev and work_geoms:
+            wg_gdf = gpd.clip(gpd.GeoDataFrame(geometry=work_geoms, crs=WORK_EPSG), geom)
+            wg_gdf = wg_gdf[~wg_gdf.geometry.is_empty]
+            if not wg_gdf.empty:
+                _plot_evidence_group(ax, handles, "участки проведения мероприятия", wg_gdf, overview=False)
+                has_poly_ev = True
+        ev_parts = [x for x in (ev_nonpt, ev_pts) if x is not None and not x.empty]
+        if ev_parts:
+            ev_plot = gpd.GeoDataFrame(pd.concat(ev_parts, ignore_index=True), crs=WORK_EPSG)
+            use_ov = True if measure_name is None else (len(ev_pts) > 35)
+            for layer, grp in ev_plot.groupby("layer"):
+                _plot_evidence_group(ax, handles, layer, grp, overview=use_ov)
+            if measure_name is not None and not ev_pts.empty and "label" in ev_pts.columns:
+                seen_pvn = set()
+                for _, pr in ev_pts.iterrows():
+                    lb = str(pr.get("label", "") or "").strip()
+                    if lb and lb not in ("nan", "None") and str(pr.get("layer", "")).startswith("лесопатология"):
+                        txt_p = lb if lb.upper().startswith("ПВН") else f"ПВН {lb}"
+                        pc = pr.geometry.centroid
+                        kp = (txt_p, round(pc.x, 1), round(pc.y, 1))
+                        if kp not in seen_pvn:
+                            seen_pvn.add(kp)
+                            pvn_lab_items.append((txt_p, pc))
+                            reserved_boxes.append((pc.x, pc.y, "ММ", 10.0))
+    elif measure_name is not None and work_geoms:
+        wg_gdf = gpd.clip(gpd.GeoDataFrame(geometry=work_geoms, crs=WORK_EPSG), geom)
+        wg_gdf = wg_gdf[~wg_gdf.geometry.is_empty]
+        if not wg_gdf.empty:
+            _plot_evidence_group(ax, handles, "участки проведения мероприятия", wg_gdf, overview=False)
+    q_rows = ctx["q_rows"]
     q_halo = [pe.withStroke(linewidth=2.8, foreground="white")]
-    for kv_s, qg in q_rows:
-        if qg is None or qg.is_empty:
-            continue
-        gpd.GeoSeries([qg], crs=WORK_EPSG).boundary.plot(ax=ax, color="#333333", linewidth=1.1, zorder=9)
-        c = qg.representative_point()
-        ax.annotate(kv_s, (c.x, c.y), ha="center", va="center", fontsize=9.5, fontweight="bold",
-                    color="#1a1a1a", zorder=12, path_effects=q_halo)
+    if measure_name is None or active_kvs is None:
+        for kv_s, qg in q_rows:
+            if qg is None or qg.is_empty:
+                continue
+            gpd.GeoSeries([qg], crs=WORK_EPSG).boundary.plot(ax=ax, color="#333333", linewidth=1.1, zorder=9)
+            c = qg.representative_point()
+            ax.annotate(kv_s, (c.x, c.y), ha="center", va="center", fontsize=9.5, fontweight="bold",
+                        color="#1a1a1a", zorder=12, path_effects=q_halo)
+            reserved_boxes.append((c.x, c.y, kv_s, 11.0))
+        handles.append(Line2D([], [], color="#333333", linewidth=1.2, label="границы кварталов"))
+    else:
+        act_set = {str(x).removesuffix(".0") for x in active_kvs}
+        has_act = has_inact = False
+        for kv_s, qg in q_rows:
+            if qg is None or qg.is_empty:
+                continue
+            if kv_s in act_set:
+                continue
+            has_inact = True
+            gpd.GeoSeries([qg], crs=WORK_EPSG).boundary.plot(
+                ax=ax, color="#8a8a8a", linewidth=0.75, linestyle="--", zorder=8.6)
+            c = qg.representative_point()
+            ax.annotate(kv_s, (c.x, c.y), ha="center", va="center", fontsize=8.5,
+                        color="#666666", zorder=11.5, path_effects=q_halo)
+            reserved_boxes.append((c.x, c.y, kv_s, 10.0))
+        for kv_s, qg in q_rows:
+            if qg is None or qg.is_empty or kv_s not in act_set:
+                continue
+            has_act = True
+            gpd.GeoSeries([qg], crs=WORK_EPSG).boundary.plot(
+                ax=ax, color="#1f1f1f", linewidth=1.35, zorder=9.3)
+            c = qg.representative_point()
+            ax.annotate(kv_s, (c.x, c.y), ha="center", va="center", fontsize=9.5, fontweight="bold",
+                        color="#111111", zorder=12.2, path_effects=q_halo)
+            reserved_boxes.append((c.x, c.y, kv_s, 11.0))
+        if has_act:
+            handles.append(Line2D([], [], color="#1f1f1f", linewidth=1.5, label="кварталы с мероприятием"))
+        if has_inact:
+            handles.append(Line2D([], [], color="#8a8a8a", linewidth=1.0, linestyle="--", label="прочие кварталы"))
     gpd.GeoSeries([geom], crs=WORK_EPSG).boundary.plot(ax=ax, color="black", linewidth=2.1, zorder=10)
-    handles.append(Line2D([], [], color="#333333", linewidth=1.2, label="границы кварталов"))
     ax.set_xlim(ext[0], ext[1])
     ax.set_ylim(ext[2], ext[3])
     if basemap:
-        try:
-            import contextily as cx
-            for _attempt in range(3):
-                prov = pick_basemap_provider(skip=_attempt)
-                if prov is None:
-                    break
-                try:
-                    cx.add_basemap(ax, crs=f"EPSG:{WORK_EPSG}", source=prov,
-                                   attribution=prov.get("attribution", "© OpenStreetMap"),
-                                   attribution_size=9, zorder=0)
-                    desaturate_last_basemap(ax)
-                    break
-                except Exception as e:
-                    log.warning("подложка %s недоступна (%s) — пробую другой источник",
-                                prov.get("name"), e)
-        except Exception as e:
-            log.warning("подложка OSM недоступна: %s", e)
+        if ctx.get("basemap_cache") is not None:
+            arr_b, ext_b, orig_b, attr_b = ctx["basemap_cache"]
+            ax.imshow(arr_b, extent=ext_b, origin=orig_b, interpolation="bilinear", zorder=0)
+            if attr_b:
+                ax.text(0.99, 0.01, attr_b, transform=ax.transAxes, ha="right", va="bottom",
+                        fontsize=7.5, color="#555555", zorder=14,
+                        bbox=dict(boxstyle="square,pad=0.15", facecolor="white", alpha=0.65, edgecolor="none"))
+        else:
+            try:
+                import contextily as cx
+                for _attempt in range(3):
+                    prov = pick_basemap_provider(skip=_attempt)
+                    if prov is None:
+                        break
+                    try:
+                        attr_b = prov.get("attribution", "© OpenStreetMap")
+                        cx.add_basemap(ax, crs=f"EPSG:{WORK_EPSG}", source=prov,
+                                       attribution=attr_b, attribution_size=9, zorder=0)
+                        desaturate_last_basemap(ax)
+                        if ax.images:
+                            im_b = ax.images[-1]
+                            ctx["basemap_cache"] = (
+                                np.asarray(im_b.get_array()).copy(),
+                                tuple(im_b.get_extent()),
+                                im_b.origin,
+                                attr_b,
+                            )
+                        break
+                    except Exception as e:
+                        log.warning("подложка %s недоступна (%s) — пробую другой источник",
+                                    prov.get("name"), e)
+            except Exception as e:
+                log.warning("подложка OSM недоступна: %s", e)
     ax.legend(handles=handles, loc="upper left", bbox_to_anchor=(1.01, 1.0), fontsize=9.5,
               frameon=True, title="Легенда", title_fontsize=10.5)
-    ax.set_title(f"{oozt_name}. Обзорная схема мероприятий", fontsize=14, fontweight="bold")
+    if measure_name is None:
+        ax.set_title(f"{oozt_name}. Обзорная схема мероприятий", fontsize=14, fontweight="bold")
+    else:
+        raw_title = f"{oozt_name}. {(measure_code + ' ') if measure_code else ''}{measure_name}"
+        wrapped_t = textwrap.fill(raw_title, width=56, break_long_words=False, break_on_hyphens=False)
+        t_fs = 12.0 if "\n" in wrapped_t else 13.5
+        ax.set_title(wrapped_t, fontsize=t_fs, fontweight="bold", pad=10)
     ax.tick_params(labelsize=10.5)
     try:
         set_degree_ticks(ax, ext)
@@ -5532,17 +5659,24 @@ def draw_oozt(data: Data, evidence: gpd.GeoDataFrame | None, oozt_name: str, out
     target_l = w / 4
     dec = 10 ** np.floor(np.log10(max(target_l, 1.0)))
     L_bar = next(m * dec for m in (5, 2, 1) if m * dec <= target_l) if target_l >= dec else dec
-    x0, y0 = ext[0] + w * 0.04, ext[2] + h * 0.04
+    x0, y0 = ext[0] + w * 0.04, ext[2] + h * 0.032
     ax.plot([x0, x0 + L_bar], [y0, y0], color="black", linewidth=3.5, zorder=14,
             path_effects=[pe.withStroke(linewidth=6.0, foreground="white")])
     bar_txt = f"{L_bar / 1000:g} км" if L_bar >= 1000 else f"{int(L_bar)} м"
-    ax.text(x0 + L_bar / 2, y0 + h * 0.02, bar_txt, ha="center", va="bottom", fontsize=10.5, zorder=14,
+    ax.text(x0 + L_bar / 2, y0 + h * 0.018, bar_txt, ha="center", va="bottom", fontsize=10.5, zorder=14,
             path_effects=[pe.withStroke(linewidth=3, foreground="white")])
+    reserved_boxes.append(box(x0 - w * 0.02, ext[2], x0 + L_bar + w * 0.02, y0 + h * 0.055))
     ax.set_aspect("equal", adjustable="box")
     fig.tight_layout()
     ax.set_xlim(ext[0], ext[1])
     ax.set_ylim(ext[2], ext[3])
     ax.set_aspect("equal", adjustable="box")
+    if pvn_lab_items:
+        try:
+            _place_labels(ax, pvn_lab_items, sizes=(8.5,), leaders=True, max_labels=60,
+                          reserved=reserved_boxes)
+        except Exception:
+            pass
     fig.savefig(out_png, bbox_inches="tight")
     plt.close(fig)
     return True
@@ -6421,6 +6555,50 @@ def execution_list(table: pd.DataFrame, cfg: Config, data: "Data | None" = None)
     return out, how
 
 
+def _work_geoms_by_oozt_measure(res: "Results | None",
+                                measures_gdf: gpd.GeoDataFrame | None) -> dict[tuple[str, str], list]:
+    """Геометрии участков проведения работ по ключу (ООЗТ, Мероприятие) для частных карт."""
+    out: dict[tuple[str, str], list] = {}
+    if res is not None and res.rows:
+        for r in res.rows:
+            g = r.get("_geom")
+            if g is not None and not g.is_empty:
+                out.setdefault((str(r.get("ООЗТ", "")), str(r.get("Мероприятие", ""))), []).append(g)
+    elif (measures_gdf is not None and not measures_gdf.empty
+          and {"ООЗТ", "Мероприятие"}.issubset(measures_gdf.columns)):
+        mg = (measures_gdf.to_crs(WORK_EPSG)
+              if measures_gdf.crs and measures_gdf.crs.to_epsg() != WORK_EPSG else measures_gdf)
+        for (oo, m), grp in mg.groupby([mg["ООЗТ"].astype(str), mg["Мероприятие"].astype(str)]):
+            gs = [g for g in grp.geometry.values if g is not None and not g.is_empty]
+            if gs:
+                out[(str(oo), str(m))] = gs
+    return out
+
+
+def _ordered_oozt_measures(data: Data, sub_oo: pd.DataFrame) -> list[tuple[str, str]]:
+    """Упорядоченный список (Мероприятие, Код) для ООЗТ в порядке справочника мероприятий."""
+    if sub_oo is None or sub_oo.empty or "Мероприятие" not in sub_oo.columns:
+        return []
+    present = list(dict.fromkeys(sub_oo["Мероприятие"].astype(str)))
+    m_list = getattr(data, "measures", None) or []
+    rank_map: dict[str, tuple[int, int, str]] = {}
+    for i, m in enumerate(m_list):
+        nm = str(m.get("name", ""))
+        cd = str(m.get("code", "") or "").strip()
+        if nm and nm not in rank_map:
+            rank_map[nm] = (i, 0, cd)
+    items = []
+    for j, nm in enumerate(present):
+        if nm in rank_map:
+            rk, sub, cd = rank_map[nm]
+            items.append((rk, sub, j, nm, cd))
+        elif " — " in nm and nm.split(" — ", 1)[0] in rank_map:
+            rk, _, cd = rank_map[nm.split(" — ", 1)[0]]
+            items.append((rk, 1, j, nm, cd))
+        else:
+            items.append((10_000 + j, 0, j, nm, ""))
+    items.sort(key=lambda t: (t[0], t[1], t[2]))
+    return [(nm, cd) for _, _, _, nm, cd in items]
 def _report_blocks(data: Data, table: pd.DataFrame, evidence, rep: Path, kv_all: pd.DataFrame,
                    basemap=True, draw=True, units: pd.DataFrame | None = None,
                    res: "Results | None" = None,
@@ -6447,6 +6625,7 @@ def _report_blocks(data: Data, table: pd.DataFrame, evidence, rep: Path, kv_all:
                f"{L['groups_n'].lower()} в отчёте: {len(kv_all)}."),
          ("p", _params_line())]
     s = lambda v: "" if pd.isna(v) else str(v)
+    ms_all = pd.DataFrame()
     if not table.empty:
         B.append(("h", 1, "Сводка по мероприятиям"))
         u = units if units is not None and not units.empty else None
@@ -6490,18 +6669,79 @@ def _report_blocks(data: Data, table: pd.DataFrame, evidence, rep: Path, kv_all:
             hdr.append("Площадь проведения, га")
             widths = [4.4, 12.7, 2.4, 2.4, 4.8]
         B.append(("table", hdr, [[s(r[c]) for c in hdr] for _, r in summ.iterrows()], widths, 9))
-    # Обзорная схема на каждое ООЗТ — перед поквартальными схемами. Строится в UTM zone 37
-    # (WORK_EPSG), без сжатия по вертикали; в легенде короткие подписи слоёв.
-    for oo in (kv_all["OOZT"].astype(str).unique() if not kv_all.empty else []):
+    # Общая обзорная схема на каждое ООЗТ (все мероприятия) + частные схемы по каждому мероприятию
+    # в проекции UTM zone 37 (WORK_EPSG) без сжатия по вертикали.
+    work_by_om = _work_geoms_by_oozt_measure(res, measures_gdf)
+    oo_areas = _oozt_areas(data)
+    ms_lookup: dict[tuple[str, str], tuple[float, float | None]] = {}
+    if not ms_all.empty:
+        for _, mr in ms_all.iterrows():
+            ms_lookup[(str(mr["ООЗТ"]), str(mr["Мероприятие"]))] = (
+                float(mr["Площадь проведения, га"]),
+                None if pd.isna(mr["% от площади ООЗТ"]) else float(mr["% от площади ООЗТ"]),
+            )
+    rep_m = rep / "measures"
+    all_oos = list(dict.fromkeys(kv_all["OOZT"].astype(str))) if not kv_all.empty else (
+        list(dict.fromkeys(data.oozt["OOZT"].astype(str))) if data.oozt is not None and not data.oozt.empty else []
+    )
+    for oo in all_oos:
+        ctx_oo = _oozt_map_ctx(data, oo) if draw else None
         png_o = rep / ("fig_oozt_" + re.sub(r"\W+", "_", str(oo)) + ".png")
         if draw:
-            log.info("Обзорная схема: %s", oo)
+            log.info("Обзорная схема (все мероприятия): %s", oo)
             try:
-                draw_oozt(data, evidence, oo, png_o, basemap=basemap)
+                draw_oozt(data, evidence, oo, png_o, basemap=basemap, ctx=ctx_oo)
             except Exception as e:
                 log.warning("Обзорная схема %s не построена: %s", oo, e)
         if png_o.exists():
-            B += [("break",), ("h", 1, f"{oo}. Обзорная схема"), ("img", png_o)]
+            B += [("break",), ("h", 1, f"{oo}. Обзорная схема (все мероприятия)"), ("img", png_o)]
+        sub_oo = (table[table["ООЗТ"].astype(str) == str(oo)]
+                  if (table is not None and not table.empty and "ООЗТ" in table.columns)
+                  else pd.DataFrame())
+        ord_ms = _ordered_oozt_measures(data, sub_oo)
+        if ord_ms:
+            rep_m.mkdir(parents=True, exist_ok=True)
+            if draw:
+                oo_s = re.sub(r"\W+", "_", str(oo)).strip("_")[:26] or "oozt"
+                for old_p in rep_m.glob(f"fig_{oo_s}_m[0-9][0-9]_*.png"):
+                    old_p.unlink(missing_ok=True)
+            oo_ha_tot, n_kv_tot = oo_areas.get(str(oo), (0.0, 0))
+            for m_idx, (m_name, m_code) in enumerate(ord_ms, 1):
+                png_m = rep_m / _measure_fig_name(oo, m_idx, m_code, m_name)
+                sub_m = sub_oo[sub_oo["Мероприятие"].astype(str) == str(m_name)]
+                kvs_raw = [str(x).removesuffix(".0") for x in sub_m["Квартал"].dropna().unique()]
+                kvs_sorted = [kvs_raw[i] for i in np.argsort(_nat_rank(kvs_raw))] if kvs_raw else []
+                wgs_m = work_by_om.get((str(oo), str(m_name)), [])
+                if draw:
+                    log.info("  Частная схема [%d/%d]: %s — %s", m_idx, len(ord_ms), oo, m_name)
+                    try:
+                        draw_oozt(data, evidence, oo, png_m, basemap=basemap, ctx=ctx_oo,
+                                  measure_name=m_name, measure_code=m_code,
+                                  active_kvs=set(kvs_sorted), work_geoms=wgs_m)
+                    except Exception as e:
+                        log.warning("  Частная схема %s (%s) не построена: %s", oo, m_name, e)
+                if png_m.exists():
+                    lbl_code = f"{m_code} " if m_code else ""
+                    B += [("break",),
+                          ("h", 2, f"{oo}. Мероприятие: {lbl_code}{m_name}"),
+                          ("img", png_m)]
+                    area_m, pct_m = ms_lookup.get((str(oo), str(m_name)), (None, None))
+                    if area_m is None and wgs_m:
+                        ug_m = _safe_union(wgs_m)
+                        if ctx_oo is not None and ctx_oo.get("geom") is not None:
+                            ug_m = ug_m.intersection(ctx_oo["geom"])
+                        area_m = round(float(ug_m.area / 1e4), 2) if ug_m is not None and not ug_m.is_empty else 0.0
+                        pct_m = round(100.0 * area_m / oo_ha_tot, 2) if oo_ha_tot > 0 else None
+                    kv_txt = (", ".join(kvs_sorted[:24])
+                              + (f" и ещё {len(kvs_sorted) - 24}" if len(kvs_sorted) > 24 else ""))
+                    cap = (f"{L['groups_n']} с мероприятием: {len(kvs_sorted)}"
+                           + (f" из {n_kv_tot}" if n_kv_tot else "")
+                           + (f" ({L['group'].lower()} {kv_txt})" if kv_txt else ""))
+                    if area_m is not None:
+                        cap += f"; площадь проведения работ: {area_m:.2f} га"
+                        if pct_m is not None:
+                            cap += f" ({pct_m:.2f}% площади ООЗТ)"
+                    B.append(("p", cap + "."))
     rt = rules_table(getattr(data, "measures", None), table, cfg)
     if not rt.empty:
         hdr2_src = ["Код", "Мероприятие", "Метод выявления (из таблицы)", "Правило", "Как рассчитано скриптом",
