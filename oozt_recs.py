@@ -2890,6 +2890,7 @@ class Data:
         global _CUR_CFG
         self.cfg = cfg
         _CUR_CFG = cfg
+        self.kvnet = None                   # kv_cut: квартальная сеть (все кварталы, включая пустые)
         self.oozt = self._load_oozt()
         self.union = _safe_union(self.oozt.geometry.values)
         self.bounds = tuple(self.oozt.total_bounds)
@@ -3078,6 +3079,7 @@ class Data:
         kv = kv.dissolve(by=["KV", "KVOOZT"], as_index=False)   # многочастный квартал → один полигон
         log.info("Квартальная сеть: %s, поле «%s»: %d кварталов", Path(cfg.kvnet_path).name, kf,
                  kv["KV"].nunique())
+        self.kvnet = kv                      # все кварталы сети — для схем пустых кварталов
 
         eco_area_ha = g.geometry.area.sum() / 1e4
         inter = _safe_overlay(g, kv, how="intersection", keep_geom_type=True)
@@ -4622,11 +4624,20 @@ def _place_labels(ax, items, sizes=(11, 10, 9, 8, 7), leaders=True, max_labels=1
 
 
 def draw_kvartal(data: Data, evidence: gpd.GeoDataFrame | None, kv, oozt_name, out_png: Path, basemap=True):
-    vyd = data.oozt[(data.oozt["KV"] == kv) & (data.oozt["OOZT"] == oozt_name)]
+    vyd = data.oozt[(data.oozt["KV"].astype(str) == str(kv)) & (data.oozt["OOZT"] == oozt_name)]
+    focus_geom = None
     if vyd.empty:
-        return None
-    focus_geom = _safe_union(vyd.geometry.values)
-    minx, miny, maxx, maxy = vyd.total_bounds
+        # пустой квартал (полигоны экосистем не попали): схема по границе из квартальной сети
+        kn = getattr(data, "kvnet", None)
+        if kn is not None and not kn.empty:
+            krow = kn[kn["KV"].astype(str) == str(kv)]
+            if not krow.empty:
+                focus_geom = _safe_union(krow.geometry.values)
+        if focus_geom is None:
+            return None
+    else:
+        focus_geom = _safe_union(vyd.geometry.values)
+    minx, miny, maxx, maxy = focus_geom.bounds
     pad = max((maxx - minx), (maxy - miny)) * 0.12 + 30
     ext = (minx - pad, maxx + pad, miny - pad, maxy + pad)
     w, h = ext[1] - ext[0], ext[3] - ext[2]
@@ -4648,7 +4659,7 @@ def draw_kvartal(data: Data, evidence: gpd.GeoDataFrame | None, kv, oozt_name, o
     # горизонтали → грунтовые дороги → дороги с твёрдым покрытием → мероприятия → кварталы.
     # Слои показываются только в пределах границы ООЗТ; вне её видна только подложка OSM.
     handles = []
-    u = data.union
+    u = focus_geom if vyd.empty else data.union
     if data.rec_points is not None and not data.rec_points.empty:
         try:
             pts = data.rec_points[data.rec_points.within(u)]
@@ -4735,8 +4746,7 @@ def draw_kvartal(data: Data, evidence: gpd.GeoDataFrame | None, kv, oozt_name, o
         handles.append(Patch(facecolor="none", edgecolor="#9AA0A6", label="прочие полигоны"))
     used_layers = []
     if evidence is not None and not evidence.empty:
-        kv_geom = _safe_union(vyd.geometry.values)
-        ev = evidence[evidence.intersects(kv_geom.buffer(5))]
+        ev = evidence[evidence.intersects(focus_geom.buffer(5))]
         for layer, grp in ev.groupby("layer"):
             color, kind = _slope_style(layer)
             if kind == "point":
@@ -4880,6 +4890,28 @@ def _report_groups_table(data: Data, kv_list) -> pd.DataFrame:
     """Список групп отчёта (кварталов / листов / групп) в порядке KV_SORT с учётом фильтра."""
     kv_all = (data.oozt[["OOZT", "KV", "KV_SORT"]].drop_duplicates(["OOZT", "KV"])
               .sort_values(["OOZT", "KV_SORT"]))
+    # kv_cut: в отчёт включаются ВСЕ кварталы сети — и те, куда не попало ни одного
+    # полигона экосистем (для них строятся схемы и разделы без мероприятий)
+    kn = getattr(data, "kvnet", None)
+    if data.cfg.unit_mode == "kv_cut" and kn is not None and not kn.empty:
+        have = set(kv_all["KV"].astype(str))
+        miss = kn[~kn["KV"].astype(str).isin(have)]
+        if not miss.empty:
+            if miss["KVOOZT"].replace("", pd.NA).notna().any():
+                oo = miss["KVOOZT"].where(miss["KVOOZT"] != "")
+            else:
+                u_oo = data.oozt["OOZT"].astype(str).unique()
+                oo = pd.Series(u_oo[0] if len(u_oo) == 1 else "", index=miss.index)
+            c_ = data.cfg
+            fb = (c_.oozt_name or "").strip() or Path(c_.oozt_path).stem
+            oo = oo.replace("", fb)
+            extra = pd.DataFrame({"OOZT": oo.astype(str).values,
+                                  "KV": miss["KV"].astype(str).values})
+            extra["KV_SORT"] = _nat_rank(extra["KV"])
+            kv_all = pd.concat([kv_all, extra], ignore_index=True)
+            kv_all = kv_all.sort_values(["OOZT", "KV_SORT"]).reset_index(drop=True)
+            log.info("Кварталы сети без полигонов экосистем (в отчёт добавлены пустыми): %s",
+                     ", ".join(miss["KV"].astype(str)))
     if kv_list:
         want = {str(x).strip() for x in kv_list}
         kv_all = kv_all[kv_all["KV"].astype(str).isin(want)]
@@ -5036,7 +5068,7 @@ def _report_blocks(data: Data, table: pd.DataFrame, evidence, rep: Path, kv_all:
             sub = table[table["ООЗТ"].astype(str) == str(oo)]
             terr = data.oozt[data.oozt["OOZT"].astype(str) == str(oo)]
             area_all = float(terr["area_ha"].sum()) if not terr.empty else 0.0
-            n_kv = int(terr["KV"].nunique()) if not terr.empty else 0
+            n_kv = int((kv_all["OOZT"].astype(str) == str(oo)).sum()) if not kv_all.empty else 0
             n_kv_m = int(sub["Квартал"].nunique()) if not sub.empty else 0
             txt = (f"{oo}: {L['groups_n'].lower()} — {n_kv}, территория — {area_all:.0f} га; "
                    f"с мероприятиями — {n_kv_m} из {n_kv}; всего назначений — {len(sub)}")
@@ -5090,7 +5122,13 @@ def _report_blocks(data: Data, table: pd.DataFrame, evidence, rep: Path, kv_all:
         B += [("break",), ("h", 1, f"{oozt}. {L['group']} {kv}")]
         if png.exists():
             B.append(("img", png))
-        B.append(("p", f"{L['units_n']}: {len(vyd)}; площадь {vyd['area_ha'].sum():.1f} га; "
+        if vyd.empty and getattr(data, "kvnet", None) is not None:
+            krow = data.kvnet[data.kvnet["KV"].astype(str) == str(kv)]
+            kv_ha = float(krow.geometry.area.sum() / 1e4) if not krow.empty else 0.0
+            area_txt = f"площадь квартала {kv_ha:.1f} га (полигонов экосистем нет)"
+        else:
+            area_txt = f"площадь {vyd['area_ha'].sum():.1f} га"
+        B.append(("p", f"{L['units_n']}: {len(vyd)}; {area_txt}; "
                        f"назначено мероприятий: {len(sub)}."))
         if sub.empty:
             B.append(("note", "Мероприятия по загруженным данным не назначены."))
