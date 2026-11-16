@@ -2420,6 +2420,7 @@ def read_vector(path: str, layer: str | None = None, bbox_wgs84=None) -> gpd.Geo
         except Exception as e:
             p_obj = Path(path)
             if p_obj.suffix.lower() == ".shp" and (".shx" in str(e).lower() or "for writing" in str(e).lower()):
+                import shutil
                 _tmp_shp_dir = tempfile.TemporaryDirectory()
                 td = Path(_tmp_shp_dir.name)
                 for ext in (".shp", ".shx", ".dbf", ".prj", ".cpg", ".qpj"):
