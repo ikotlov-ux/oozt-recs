@@ -265,6 +265,7 @@ CORVUS_WINDOW_M = 500.0    # радиус окна плотности врано
 RARE_BUFFER_M = 50.0       # буфер от точек редких видов, м
 SHORE_BUFFER_M = 50.0      # буфер вдоль водных объектов для «укрепления берегов», м
 SDM_THRESHOLD = 0.75       # порог вероятности SDM (по умолчанию, редкие виды)
+KV_SPLIT_GAP_M = 300             # м: части квартала дальше друг от друга считаются разными массивами
 SDM_THRESHOLD_INVASIVE = 0.95   # порог вероятности SDM для инвазионных видов
 SDM_THRESHOLD_RARE = SDM_THRESHOLD  # порог вероятности SDM для редких видов
 MIN_PATCH_HA = 0.05        # минимальная площадь пятна (уклон/плотность/SDM) в выделе для назначения, га
@@ -3032,6 +3033,126 @@ class Data:
                  ", ".join(map(str, g["OOZT"].unique())))
         return g
 
+    def _split_dup_kv_parts(self, kv: gpd.GeoDataFrame, cfg, eco_oozt: str = "") -> gpd.GeoDataFrame:
+        """Разделение по кластерам ООЗТ при дублировании нумерации кварталов.
+
+        Номера кварталов иногда совпадают в разных массивах одной сети (например, 1–3
+        есть и в основном массиве Измайлово, и в Терлецкой дубраве). После dissolve по
+        номеру они слились в один многочастный квартал, и мероприятия назначались обеим
+        частям сразу — «Северный Терлецкий пруд» попадал в квартал 1 основного массива.
+
+        Части дублированных кварталов группируются в массивы по взаимному касанию
+        (разрыв больше KV_SPLIT_GAP_M внутри одного номера — уже разные массивы).
+        Главный массив — тот, чьи кварталы граничат с большим числом прочих кварталов
+        сети (у небольшого массива соседей мало). Он сохраняет имя ООЗТ; остальные
+        получают метку «Измайлово (юго-восточный массив)» — по направлению от центра
+        главного массива. Так меры назначаются в пределах своего массива, а списки
+        кварталов в отчёте остаются уникальными.
+        """
+        import math
+        from collections import defaultdict
+        from shapely.ops import unary_union
+        from shapely.strtree import STRtree
+        fallback = ((cfg.oozt_name or "").strip() or eco_oozt
+                   or Path(cfg.oozt_path).stem)
+        # все части с их номерами и исходными метками ООЗТ
+        parts, p_kv, p_oo = [], [], []
+        for _, r in kv.iterrows():
+            oo = str(r["KVOOZT"]).strip() or fallback
+            for g in (r.geometry.geoms if r.geometry.geom_type in (
+                    "MultiPolygon", "GeometryCollection") else [r.geometry]):
+                if not g.is_empty and g.area > 0:
+                    parts.append(g); p_kv.append(r["KV"]); p_oo.append(oo)
+        n = len(parts)
+
+        def _clusters(kvsel):
+            """Кластеры частей одного номера: разрыв ≤ KV_SPLIT_GAP_M — один массив."""
+            idx = [i for i in range(n) if p_kv[i] == kvsel]
+            parent = list(range(len(idx)))
+
+            def find(a):
+                while parent[a] != a:
+                    parent[a] = parent[parent[a]]
+                    a = parent[a]
+                return a
+            tr = STRtree([parts[i] for i in idx])
+            for ai in range(len(idx)):
+                for aj in tr.query(parts[idx[ai]], predicate="dwithin",
+                                   distance=KV_SPLIT_GAP_M):
+                    aj = int(aj)
+                    if aj > ai:
+                        ra, rb = find(ai), find(aj)
+                        if ra != rb:
+                            parent[rb] = ra
+            cl = defaultdict(list)
+            for ai in range(len(idx)):
+                cl[find(ai)].append(idx[ai])
+            return list(cl.values())
+
+        dup_kvs = {kvv for kvv in set(p_kv) if len(_clusters(kvv)) > 1}
+        if not dup_kvs:
+            out = gpd.GeoDataFrame({"KV": p_kv, "KVOOZT": p_oo, "geometry": parts},
+                                   crs=kv.crs or WORK_EPSG)
+            return out.dissolve(by=["KV", "KVOOZT"], as_index=False)
+        # массивы: группы частей разных дублированных номеров, касающиеся друг друга
+        dup_idx = [i for i in range(n) if p_kv[i] in dup_kvs]
+        cl2id = {}
+        for kvv in dup_kvs:
+            for ci, idxs in enumerate(_clusters(kvv)):
+                for i in idxs:
+                    cl2id[i] = (kvv, ci)
+        ids = list(cl2id.values())
+        gid = {c: k for k, c in enumerate(ids)}
+        parent = list(range(len(ids)))
+
+        def find(a):
+            while parent[a] != a:
+                parent[a] = parent[parent[a]]
+                a = parent[a]
+            return a
+        tr = STRtree([parts[i] for i in dup_idx])
+        for i in dup_idx:
+            for j in tr.query(parts[i], predicate="intersects"):
+                j = dup_idx[int(j)]            # STRtree возвращает позицию в dup_idx
+                if j <= i or p_kv[i] == p_kv[j]:
+                    continue
+                ra, rb = find(gid[cl2id[i]]), find(gid[cl2id[j]])
+                if ra != rb:
+                    parent[rb] = ra
+        groups = defaultdict(list)
+        for i in dup_idx:
+            groups[find(gid[cl2id[i]])].append(i)
+        # главный массив: максимум соседних прочих (недублированных) кварталов сети
+        other_geom = unary_union([parts[i] for i in range(n) if p_kv[i] not in dup_kvs])
+        main_root = max(groups, key=lambda g: (
+            sum(1 for i in range(n) if p_kv[i] not in dup_kvs and parts[i].intersects(
+                unary_union([parts[j] for j in groups[g]]))),
+            sum(parts[i].area for i in groups[g])))
+        main_c = unary_union([parts[i] for i in groups[main_root]]).centroid
+        dirs = ["восточный", "северо-восточный", "северный", "северо-западный",
+                "западный", "юго-западный", "южный", "юго-восточный"]   # atan2: 0° = восток
+        gname, used = {}, {}
+        for g in groups:
+            if g == main_root:
+                continue
+            c = unary_union([parts[i] for i in groups[g]]).centroid
+            ang = math.degrees(math.atan2(c.y - main_c.y, c.x - main_c.x)) % 360
+            d = dirs[int((ang + 22.5) % 360 // 45)]
+            used[d] = used.get(d, 0) + 1
+            d = d if used[d] == 1 else f"{d}-{used[d]}"
+            gname[g] = f"{p_oo[groups[g][0]]} ({d} массив)"
+            log.warning(
+                "Дублирование нумерации кварталов: массив из кварталов %s отделён от "
+                "главного и выделен в отдельное ООЗТ «%s»", 
+                ", ".join(sorted({p_kv[i] for i in groups[g]}, key=lambda x: (len(x), x))),
+                gname[g])
+        for g, nm in gname.items():
+            for i in groups[g]:
+                p_oo[i] = nm
+        out = gpd.GeoDataFrame({"KV": p_kv, "KVOOZT": p_oo, "geometry": parts},
+                               crs=kv.crs or WORK_EPSG)
+        return out.dissolve(by=["KV", "KVOOZT"], as_index=False)
+
     def _cut_by_kvartals(self, g: gpd.GeoDataFrame, pick) -> gpd.GeoDataFrame:
         """Режим kv_cut: экосистемы разрезаются границами кварталов. В каждом квартале — новая
         нумерация получившихся выделов с 1: от северо-западного угла квартала, с запада на восток,
@@ -3077,6 +3198,20 @@ class Data:
         kv = kv[["KV", "KVOOZT", "geometry"]].copy()
         kv = repair_geometries(kv)
         kv = kv.dissolve(by=["KV", "KVOOZT"], as_index=False)   # многочастный квартал → один полигон
+        # Дублирование нумерации кварталов: один номер (1–3, …) встречается в нескольких
+        # несвязанных массивах сети. Растворение превратило их в один многочастный квартал,
+        # и мероприятия назначались обеим частям разом (например, «Северный Терлецкий пруд»
+        # оказывался в квартале 1 основного массива Измайлово). Решение: каждая связная
+        # часть получает отдельную метку ООЗТ. Крупнейший массив — под именем самого ООЗТ,
+        # остальные — «Имя (направление массив)» по компасу относительно главного массива.
+        # базовое имя ООЗТ для кварталов сети без своей метки: если экосистемы
+        # однородны, берём их имя (иначе — имя файла или cfg.oozt_name)
+        eco_oozt = ""
+        if "OOZT" in g.columns and not g.empty:
+            vc = g["OOZT"].astype(str).str.strip().value_counts()
+            if len(vc) == 1:
+                eco_oozt = vc.index[0]
+        kv = self._split_dup_kv_parts(kv, cfg, eco_oozt)
         log.info("Квартальная сеть: %s, поле «%s»: %d кварталов", Path(cfg.kvnet_path).name, kf,
                  kv["KV"].nunique())
         self.kvnet = kv                      # все кварталы сети — для схем пустых кварталов
@@ -3105,6 +3240,11 @@ class Data:
         inter["OOZT"] = o.where(o != "", kvo)
         fallback = (cfg.oozt_name or "").strip() or Path(cfg.oozt_path).stem
         inter["OOZT"] = inter["OOZT"].where(inter["OOZT"] != "", fallback)
+        # дублированные номера: метка массива из сети главнее имени ООЗТ слоя экосистем —
+        # иначе обе части квартала снова сольются в одно ООЗТ
+        _dup_kv = set(kv.loc[kv["KV"].duplicated(keep=False), "KV"].astype(str))
+        _m = inter["KV"].astype(str).isin(_dup_kv) & (kvo != "")
+        inter["OOZT"] = inter["OOZT"].where(~_m, kvo[_m])
         if "Name" not in inter.columns:
             inter["Name"] = inter["Type"]
 
@@ -4554,7 +4694,21 @@ def set_degree_ticks(ax, ext):
 
 
 def _legend_label(layer: str) -> str:
-    """Перенос длинных подписей, чтобы легенда не растягивала схему."""
+    """Подпись слоя в легенде схемы — короткая.
+
+    Полный список латинских таксонов («Acer negundo, …, Zizania latifolia — точки»)
+    не помещается в легенду и растягивает схему до нечитаемой полосы. Для видовых
+    слоёв остаются категория («инвазивные виды — точки») и первый таксон с числом
+    остальных; полный перечень таксонов приведён в тексте отчёта.
+    """
+    if len(layer) > 45 and " — " in layer and not layer.startswith(("лесопатология", "полоса", "уклон")):
+        m = re.match(r"^(.*?)\s—\s(точки|полигоны|SDM.*)$", layer)
+        if m and len(m.group(1)) > 40:
+            taxa = [t.strip() for t in m.group(1).split(",") if t.strip()]
+            first = taxa[0] if taxa else m.group(1)
+            n = len(taxa)
+            head = first if n == 1 else f"{first} и ещё {n - 1}"
+            return f"{head} — {m.group(2)}"
     if len(layer) > 45 and " м от " in layer:
         return layer.replace(" м от ", " м\nот ", 1)
     return layer
@@ -4621,6 +4775,134 @@ def _place_labels(ax, items, sizes=(11, 10, 9, 8, 7), leaders=True, max_labels=1
                 placed.append(b); n += 1
                 break
     return n
+
+
+def draw_oozt(data: Data, evidence: gpd.GeoDataFrame | None, oozt_name: str, out_png: Path,
+               basemap=True):
+    """Обзорная схема на одно ООЗТ: границы кварталов с номерами и слои оснований.
+
+    Строится в UTM zone 37 (WORK_EPSG) — квадратная сетка, без сжатия по вертикали,
+    которое даёт градусная проекция для широты Москвы. В легенде — только короткие
+    подписи слоёв; список таксонов см. в тексте отчёта.
+    """
+    same = data.oozt[data.oozt["OOZT"].astype(str) == str(oozt_name)]
+    geom = data.union
+    if same.empty:
+        kn = getattr(data, "kvnet", None)
+        if kn is None or kn.empty:
+            return None
+        krow = kn[kn["KVOOZT"].astype(str) == str(oozt_name)] if "KVOOZT" in kn.columns else None
+        if krow is None or krow.empty:
+            return None
+        geom = _safe_union(krow.geometry.values)
+    minx, miny, maxx, maxy = geom.bounds
+    pad = max(maxx - minx, maxy - miny) * 0.06 + 30
+    ext = (minx - pad, maxx + pad, miny - pad, maxy + pad)
+    w, h = ext[1] - ext[0], ext[3] - ext[2]
+    fig_w = 11
+    fig_h = max(6, min(11, fig_w * h / w))
+    fig, ax = plt.subplots(figsize=(fig_w, fig_h), dpi=200)
+    ax.set_xlim(ext[0], ext[1])
+    ax.set_ylim(ext[2], ext[3])
+    u = geom
+    handles = []
+    if data.hydro_polys is not None and not data.hydro_polys.empty:
+        hp = gpd.clip(data.hydro_polys, u)
+        if not hp.empty:
+            hp.plot(ax=ax, color="#A6CEE3", edgecolor="none", alpha=0.85, zorder=2)
+            handles.append(Patch(facecolor="#A6CEE3", alpha=0.9, edgecolor="none",
+                                 label="озёра и пруды"))
+    if data.hydro_lines is not None and not data.hydro_lines.empty:
+        hl = gpd.clip(data.hydro_lines, u)
+        if not hl.empty:
+            hl.plot(ax=ax, color="#1F78B4", linewidth=0.9, alpha=0.9, zorder=2.5)
+            handles.append(Line2D([], [], color="#1F78B4", linewidth=1.6,
+                                  label="реки и канавы"))
+    if data.trails is not None and not data.trails.empty:
+        tl = gpd.clip(data.trails, u)
+        if not tl.empty:
+            tl.plot(ax=ax, color="#b5b5b5", linewidth=0.45, alpha=0.75, zorder=3.5)
+            handles.append(Line2D([], [], color="#b5b5b5", linewidth=1.0,
+                                  label="грунтовые дороги и тропы"))
+    if data.trails_informal is not None and not data.trails_informal.empty:
+        it = gpd.clip(data.trails_informal, u)
+        if not it.empty:
+            it.plot(ax=ax, color="#c98d5a", linewidth=0.7, alpha=0.85, zorder=3.6)
+            handles.append(Line2D([], [], color="#c98d5a", linewidth=1.2,
+                                  label="стихийные тропы OSM"))
+    if evidence is not None and not evidence.empty:
+        ev = evidence[evidence.intersects(geom.buffer(5))]
+        for layer, grp in ev.groupby("layer"):
+            color, kind = _slope_style(layer)
+            if kind == "point":
+                grp.plot(ax=ax, color=color, markersize=28, edgecolor="white",
+                         linewidth=0.4, zorder=6)
+            elif kind == "line":
+                grp.plot(ax=ax, color=color, linewidth=1.6, zorder=5)
+            elif "SDM" in layer:
+                grp.plot(ax=ax, facecolor="none", edgecolor=color, alpha=0.9,
+                         linewidth=0.7, hatch="////", zorder=4)
+            else:
+                grp.plot(ax=ax, facecolor=color, edgecolor=color, alpha=0.35,
+                         linewidth=0.6, zorder=4)
+            handles.append(Patch(facecolor=color, alpha=0.5, edgecolor=color,
+                                 label=_legend_label(layer)))
+    q = data.quarters()
+    if q is not None and not q.empty:
+        qq = q[q["OOZT"].astype(str) == str(oozt_name)] if "OOZT" in q.columns else q
+        if not qq.empty:
+            for _, r in qq.iterrows():
+                gpd.GeoSeries([r.geometry], crs=WORK_EPSG).boundary.plot(
+                    ax=ax, color="#444444", linewidth=1.2, zorder=9)
+                c = r.geometry.representative_point()
+                ax.annotate(str(r["KV"]).removesuffix(".0"), (c.x, c.y),
+                            ha="center", va="center", fontsize=10, fontweight="bold",
+                            color="#333333", zorder=12)
+    else:
+        kn = getattr(data, "kvnet", None)
+        if kn is not None and not kn.empty:
+            for _, r in kn.iterrows():
+                gpd.GeoSeries([r.geometry], crs=WORK_EPSG).boundary.plot(
+                    ax=ax, color="#444444", linewidth=1.2, zorder=9)
+                c = r.geometry.representative_point()
+                ax.annotate(str(r["KV"]).removesuffix(".0"), (c.x, c.y),
+                            ha="center", va="center", fontsize=10, fontweight="bold",
+                            color="#333333", zorder=12)
+    gpd.GeoSeries([geom], crs=WORK_EPSG).boundary.plot(ax=ax, color="black",
+                                                      linewidth=2.0, zorder=10)
+    if basemap:
+        try:
+            import contextily as cx
+            for _attempt in range(3):
+                prov = pick_basemap_provider(skip=_attempt)
+                if prov is None:
+                    break
+                try:
+                    cx.add_basemap(ax, crs=f"EPSG:{WORK_EPSG}", source=prov,
+                                   attribution=prov.get("attribution", "© OpenStreetMap"),
+                                   attribution_size=10, zorder=0)
+                    desaturate_last_basemap(ax)
+                    break
+                except Exception as e:
+                    log.warning("подложка %s недоступна (%s) — пробую другой источник",
+                                prov.get("name"), e)
+        except Exception as e:
+            log.warning("подложка OSM недоступна: %s", e)
+    ax.legend(handles=handles, loc="upper left", bbox_to_anchor=(1.01, 1.0), fontsize=11,
+              frameon=True, title="Легенда", title_fontsize=11)
+    ax.set_title(f"{oozt_name}. Обзорная схема", fontsize=15, fontweight="bold")
+    ax.tick_params(labelsize=11)
+    try:
+        set_degree_ticks(ax, ext)
+    except Exception as e:
+        log.warning("не удалось построить сетку в градусах (%s) — оси в метрах", e)
+        ax.set_xlabel("E, м (UTM 37N)", fontsize=11)
+        ax.set_ylabel("N, м", fontsize=11)
+        ax.ticklabel_format(style="plain", useOffset=False)
+    fig.tight_layout()
+    fig.savefig(out_png, bbox_inches="tight")
+    plt.close(fig)
+    return True
 
 
 def draw_kvartal(data: Data, evidence: gpd.GeoDataFrame | None, kv, oozt_name, out_png: Path, basemap=True):
@@ -4886,6 +5168,97 @@ def units_table(data: Data, res: Results) -> pd.DataFrame:
     return df[cols].reset_index(drop=True)
 
 
+def _oozt_areas(data: Data) -> dict:
+    """Площадь каждого ООЗТ (га) и число кварталов сети: из квартальной сети
+    (все кварталы, включая без мероприятий); без сети — сумма полигонов экосистем."""
+    kn = getattr(data, "kvnet", None)
+    if kn is not None and not kn.empty and "KVOOZT" in kn.columns:
+        kv = kn.copy()
+        kv["KVOOZT"] = kv["KVOOZT"].astype(str).str.strip().replace({"nan": "", "None": ""})
+        if (kv["KVOOZT"] != "").any():
+            kv["_a"] = kv.geometry.area / 1e4
+            g = kv.groupby("KVOOZT").agg(areas=("_a", "sum"), kvs=("KV", "nunique"))
+            return {o: (round(float(r.areas), 2), int(r.kvs)) for o, r in g.iterrows()}
+    if data.oozt is not None and not data.oozt.empty:
+        g = data.oozt.groupby(data.oozt["OOZT"].astype(str)).agg(
+            areas=("area_ha", "sum"), kvs=("KV", "nunique"))
+        return {o: (round(float(r.areas), 2), int(r.kvs)) for o, r in g.iterrows()}
+    return {}
+
+
+def oozt_summary(data: Data, table: pd.DataFrame, units: pd.DataFrame) -> pd.DataFrame:
+    """Сводка по каждому ООЗТ: площадь, мероприятия в штуках, гектарах и процентах.
+
+    «Площадь с мероприятиями» — суммарная площадь участков, которым назначено хотя бы
+    одно мероприятие (каждый участок считается один раз); «Суммарная площадь назначений» —
+    сумма по парам участок × мероприятие (участок с несколькими мероприятиями входит
+    столько же раз). Проценты — от общей площади ООЗТ; участки разных мероприятий могут
+    перекрываться, поэтому проценты не обязаны давать в сумме 100.
+    """
+    cols = ["ООЗТ", "Площадь ООЗТ, га", "Кварталов всего", "Мероприятий, шт",
+            "Уникальных мероприятий", "Кварталов с мероприятиями",
+            "Площадь с мероприятиями, га", "Покрытие, % от площади ООЗТ",
+            "Суммарная площадь назначений, га", "Назначений, % от площади ООЗТ"]
+    areas = _oozt_areas(data)
+    rows = {o: [a, nk, 0, 0, 0, 0.0, 0.0] for o, (a, nk) in areas.items()}
+    t = table if table is not None and not table.empty else pd.DataFrame()
+    u = units if units is not None and not units.empty else pd.DataFrame()
+    if not t.empty:
+        for o, g in t.groupby(t["ООЗТ"].astype(str)):
+            if o not in rows:
+                rows[o] = [0.0, 0, 0, 0, 0, 0.0, 0.0]
+            rows[o][2] = len(g)                      # назначений (строк)
+            rows[o][3] = g["Мероприятие"].nunique()   # уникальных мероприятий
+            rows[o][4] = g["Квартал"].nunique() if "Квартал" in g.columns else 0
+    if not u.empty:
+        u2 = u.copy()
+        u2["ООЗТ"] = u2["ООЗТ"].astype(str)
+        u2["Площадь, га"] = u2["Площадь, га"].astype(float)
+        cov = u2.drop_duplicates(["uid", "ООЗТ"]).groupby("ООЗТ")["Площадь, га"].sum()
+        per_m = u2.groupby("ООЗТ")["Площадь, га"].sum()
+        for o in rows:
+            rows[o][5] = round(float(cov.get(o, 0.0)), 2)
+            rows[o][6] = round(float(per_m.get(o, 0.0)), 2)
+    base_cols = [cols[0]] + cols[1:7] + [cols[8]]
+    df = pd.DataFrame([[k] + v for k, v in rows.items()], columns=base_cols)
+    if df.empty:
+        return pd.DataFrame(columns=cols)
+    _tot = df["Площадь ООЗТ, га"].tolist()
+    _cov = df["Площадь с мероприятиями, га"].tolist()
+    _asg = df["Суммарная площадь назначений, га"].tolist()
+    df["Покрытие, % от площади ООЗТ"] = [
+        round(100 * c / t, 2) if t else None for c, t in zip(_cov, _tot)]
+    df["Назначений, % от площади ООЗТ"] = [
+        round(100 * a / t, 2) if t else None for a, t in zip(_asg, _tot)]
+    return df.sort_values("ООЗТ").reset_index(drop=True)
+
+
+def oozt_measure_summary(data: Data, table: pd.DataFrame, units: pd.DataFrame) -> pd.DataFrame:
+    """Сводка ООЗТ × мероприятие: число назначений, площадь участков и процент
+    от общей площади ООЗТ."""
+    cols = ["ООЗТ", "Мероприятие", "Назначений, шт", "Кварталов", "Площадь участков, га",
+            "% от площади ООЗТ"]
+    if units is None or units.empty:
+        return pd.DataFrame(columns=cols)
+    areas = _oozt_areas(data)
+    u = units.copy()
+    u["ООЗТ"] = u["ООЗТ"].astype(str)
+    u["Площадь, га"] = u["Площадь, га"].astype(float)
+    g = u.groupby(["ООЗТ", "Мероприятие"], as_index=False).agg(
+        **{"Назначений, шт": ("uid", "size"), "Кварталов": ("Квартал", "nunique"),
+           "Площадь участков, га": ("Площадь, га", "sum")})
+    g["Площадь участков, га"] = g["Площадь участков, га"].round(2)
+    g["% от площади ООЗТ"] = [round(100 * a / areas[o][0], 2) if o in areas and areas[o][0]
+                              else None for o, a in zip(g["ООЗТ"], g["Площадь участков, га"])]
+    order = {}
+    if table is not None and not table.empty:
+        for i, m in enumerate(table["Мероприятие"].drop_duplicates()):
+            order[m] = i
+    g = g.sort_values(["ООЗТ", "Мероприятие"],
+                     key=lambda s: s.map(order) if s.name == "Мероприятие" else s)
+    return g[cols].reset_index(drop=True)
+
+
 def _report_groups_table(data: Data, kv_list) -> pd.DataFrame:
     """Список групп отчёта (кварталов / листов / групп) в порядке KV_SORT с учётом фильтра."""
     kv_all = (data.oozt[["OOZT", "KV", "KV_SORT"]].drop_duplicates(["OOZT", "KV"])
@@ -5089,6 +5462,19 @@ def _report_blocks(data: Data, table: pd.DataFrame, evidence, rep: Path, kv_all:
             hdr.append("Площадь участков, га")
             widths = [4.4, 12.9, 2.4, 2.4, 4.6]
         B.append(("table", hdr, [[s(r[c]) for c in hdr] for _, r in summ.iterrows()], widths, 9))
+    # Обзорная схема на каждое ООЗТ — перед поквартальными схемами. Строится в UTM zone 37
+    # (WORK_EPSG), без сжатия по вертикали; в легенде короткие подписи слоёв.
+    for oo in (kv_all["OOZT"].astype(str).unique() if not kv_all.empty else []):
+        png_o = rep / ("fig_oozt_" + re.sub(r"\W+", "_", str(oo)) + ".png")
+        if draw:
+            log.info("Обзорная схема: %s", oo)
+            try:
+                draw_oozt(data, evidence, oo, png_o, basemap=basemap)
+            except Exception as e:
+                log.warning("Обзорная схема %s не построена: %s", oo, e)
+        if png_o.exists():
+            B.append(("h", 1, f"{oo}. Обзорная схема"))
+            B.append(("img", png_o))
     rt = rules_table(getattr(data, "measures", None), table, cfg)
     if not rt.empty:
         hdr2 = ["Код", "Мероприятие", "Метод выявления (из таблицы)", "Правило", "Как рассчитано скриптом",
@@ -6177,6 +6563,42 @@ def run(cfg: Config):
                             cell.alignment = Alignment(wrap_text=True, vertical="top")
     except Exception as e:
         log.warning("Excel не записан (%s) — есть CSV", e)
+
+    # Сводка по каждому ООЗТ: площадь, мероприятия в штуках, гектарах и процентах
+    # от общей площади. Пишется отдельными листами в тот же measures_long.xlsx
+    # (и дублируется в CSV — на случай, если Excel-модуль недоступен).
+    try:
+        sm = oozt_summary(data, table, units)
+        ms = oozt_measure_summary(data, table, units)
+        if not sm.empty:
+            sm.to_csv(out / "oozt_summary.csv", index=False, encoding="utf-8-sig")
+            ms.to_csv(out / "oozt_summary_by_measure.csv", index=False, encoding="utf-8-sig")
+            with pd.ExcelWriter(out / "measures_long.xlsx", engine="openpyxl",
+                                 mode="a", if_sheet_exists="replace") as xw:
+                sm.to_excel(xw, index=False, sheet_name="сводка по ООЗТ")
+                if not ms.empty:
+                    ms.to_excel(xw, index=False, sheet_name="ООЗТ × мероприятие")
+                from openpyxl.styles import Alignment as _A3, Font as _F3, PatternFill as _P3
+                for sh in ("сводка по ООЗТ", "ООЗТ × мероприятие"):
+                    ws = xw.book[sh]
+                    ws.freeze_panes = "A2"
+                    ws.auto_filter.ref = ws.dimensions
+                    for cell in ws[1]:
+                        cell.font = _F3(bold=True)
+                        cell.fill = _P3("solid", fgColor="D9EAD3")
+                        cell.alignment = _A3(wrap_text=True, vertical="center",
+                                             horizontal="center")
+                    for row in ws.iter_rows(min_row=2):
+                        for cell in row:
+                            cell.alignment = _A3(wrap_text=True, vertical="top")
+                    widths = ([30, 16, 14, 14, 18, 20, 24, 24, 28, 26] if sh == "сводка по ООЗТ"
+                              else [30, 44, 14, 12, 20, 18])
+                    for i, w in enumerate(widths[:ws.max_column], 1):
+                        ws.column_dimensions[chr(64 + i)].width = w
+            log.info("Сводка по ООЗТ: %d ООЗТ; листы «сводка по ООЗТ», "
+                     "«ООЗТ × мероприятие» в measures_long.xlsx", len(sm))
+    except Exception as e:
+        log.warning("Сводка по ООЗТ не записана: %s", e)
 
     ev = res.evidence_gdf()
     try:
