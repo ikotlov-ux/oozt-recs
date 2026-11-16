@@ -2407,13 +2407,34 @@ def read_vector(path: str, layer: str | None = None, bbox_wgs84=None) -> gpd.Geo
             kw["bbox"] = tuple(bb)
         except Exception:
             pass
+    def _read_with_enc(pth):
+        try:
+            return gpd.read_file(pth, **kw), pth
+        except UnicodeDecodeError:
+            return gpd.read_file(pth, encoding="cp1251", **kw), pth
+
+    _tmp_shp_dir = None
     try:
-        g = gpd.read_file(path, **kw)
-    except UnicodeDecodeError:
-        g = gpd.read_file(path, encoding="cp1251", **kw)
-    if g.empty:
-        return g
-    g = fix_text_encoding(g, path, kw)
+        try:
+            g, read_path = _read_with_enc(path)
+        except Exception as e:
+            p_obj = Path(path)
+            if p_obj.suffix.lower() == ".shp" and (".shx" in str(e).lower() or "for writing" in str(e).lower()):
+                _tmp_shp_dir = tempfile.TemporaryDirectory()
+                td = Path(_tmp_shp_dir.name)
+                for ext in (".shp", ".shx", ".dbf", ".prj", ".cpg", ".qpj"):
+                    cand = p_obj.with_suffix(ext)
+                    if cand.exists():
+                        shutil.copy2(cand, td / cand.name)
+                g, read_path = _read_with_enc(str(td / p_obj.name))
+            else:
+                raise
+        if g.empty:
+            return g
+        g = fix_text_encoding(g, read_path, kw)
+    finally:
+        if _tmp_shp_dir is not None:
+            _tmp_shp_dir.cleanup()
     g = g[~g.geometry.isna() & ~g.geometry.is_empty].copy()
     crs = fix_crs(g.crs, g.total_bounds, Path(path).name)
     g = g.set_crs(crs, allow_override=True)
