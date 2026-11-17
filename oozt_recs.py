@@ -285,6 +285,40 @@ TYPE_NEARWATER = ("околовод", "болот")
 ANTHRO_MEADOW_MARKS = ("газон", "бурьян", "бурья", "503", "222")
 
 
+# Структурные классы экосистем (поле «Структурный класс»; коды class_value — три последние цифры)
+STRUCT_CODE_CLASSES = {
+    **{c: "Широколиственные леса" for c in (110, 111, 112, 113, 121)},
+    **{c: "Мелколиственные леса" for c in (131, 132, 134, 135, 171)},
+    **{c: "Хвойные леса" for c in (141, 142)},
+    **{c: "Смешанные леса" for c in (151, 152, 153, 161)},
+    211: "Суходольные луга", 212: "Суходольные луга",
+    221: "Мезофитные луга", 223: "Мезофитные луга", 224: "Мезофитные луга",
+    222: "Мезофитные луга (антропогенные)",
+    231: "Гидроморфные луга", 232: "Гидроморфные луга", 233: "Гидроморфные луга",
+    310: "Болота", 400: "Вода", 501: "Антропогенные", 503: "Антропогенные",
+}
+# I.7 «Мозаичное выкашивание»: косим все луга, включая бурьян (222); гидроморфные луга (231–233) не косим
+STRUCT_MOW_DEFAULT = ("Суходольные луга", "Мезофитные луга", "Мезофитные луга (антропогенные)")
+
+
+def _norm_txt(s) -> str:
+    """Текст для сравнения: строчные, ё → е, без лишних пробелов."""
+    return re.sub(r"\s+", " ", str(s if s is not None else "").strip().lower().replace("ё", "е"))
+
+
+def struct_class_of(value) -> str:
+    """Значение поля «Структурный класс» → название класса. Число/код (class_value, например 5222 или 222)
+    понимается по трём последним цифрам; текст возвращается как есть."""
+    if value is None or (isinstance(value, float) and np.isnan(value)):
+        return ""
+    t = str(value).strip()
+    m = re.fullmatch(r"(\d+)(?:\.0+)?", t)
+    if m:
+        code = int(m.group(1)[-3:])
+        return STRUCT_CODE_CLASSES.get(code, t)
+    return t
+
+
 def _anthro_meadow(text) -> bool:
     """Тип полигона — антропогенный луг (газоны 503 / бурьян 222)."""
     t = str(text or "").lower().replace("ё", "е")
@@ -330,6 +364,10 @@ class Config:
     wetlands: list[str] = field(default_factory=list)    # болота (полигоны) — мероприятие I.8
     recreation: list[str] = field(default_factory=list)   # рекреационные объекты (точки) — тепловая карта на схемах
     lesopat_points: list[str] = field(default_factory=list)  # лесопатология: ПВН (Excel или вектор с категорией)
+    # справочник водоёмов и болот ООЗТ (Excel; отметки мероприятий I.8, I.9, I.11, III.7); пусто — refdata/
+    water_ref: str | None = None
+    # справочник цветения охраняемых растений (Excel; сроки III.4 и синонимы); пусто — refdata/
+    flowering_ref: str | None = None
     # слои видов и редких экосистем: [{path, category, group, kind, field}], см. SPECIES_*
     species_layers: list = field(default_factory=list)
     out_dir: str = ""
@@ -339,6 +377,13 @@ class Config:
     split_multipart: bool = True         # многочастный объект → отдельные контуры (ID-1, ID-2, …)
     report_formats: list = field(default_factory=lambda: ["docx", "pdf"])  # docx, pdf, doc; report.md — всегда
     fields: dict = field(default_factory=dict)      # kv_vyd: OOZT, KV, VYD, TYPE, NAME; eco: ID, TYPE, NAME, OOZT
+
+    def __post_init__(self):
+        # справочники по умолчанию — из папки refdata/ рядом со скриптом
+        for key, name in REF_DEFAULTS.items():
+            if not getattr(self, key, None):
+                d = _REF_DIR / name
+                setattr(self, key, str(d) if d.exists() else None)
 
     def save(self, path: str | Path):
         Path(path).write_text(json.dumps(asdict(self), ensure_ascii=False, indent=2), encoding="utf-8")
@@ -420,6 +465,13 @@ LAYER_SPECS = [
     dict(key="recreation", title="Рекреационные объекты (точки)", multi=True, kind="vec",
          what="точки (площадки, навесы, беседки, инфраструктура отдыха) — тепловая карта "
               "концентрации на схемах кварталов; поле категории объекта, если есть"),
+    dict(key="water_ref", title="Справочник водоёмов и болот (Excel)", multi=False, kind="xls",
+         what="лист «Битца и Измайлово» / «Все ООЗТ Москвы»: объекты с координатами и отметками "
+              "мероприятий I.8, I.9, I.11, III.7 (1 / да / + / ●); по умолчанию — refdata/"
+              "Справочник_водоёмов_и_болот_ООЗТ_Москвы.xlsx"),
+    dict(key="flowering_ref", title="Справочник цветения охраняемых растений (Excel)", multi=False, kind="xls",
+         what="лист «Справочник»: латинские названия (в слое и по Красной книге — синонимы), месяцы "
+              "цветения IV–IX (●) — сроки III.4; по умолчанию — refdata/okhranyaemye_rasteniya_tsvetenie.xlsx"),
     dict(key="lesopat_points", title="Лесопатология: ПВН (точки)", multi=True, kind="vec_xls",
          what="Excel с описаниями ПВН (PVN_…xlsx: «№ ПВН», «Рекомендации», «Широта/Долгота») "
               "либо векторный слой (.gpkg, .shp) с полями «Рекомендации» / «recomend*» или «Категория». "
@@ -581,8 +633,37 @@ RULES = {
         params=dict(types=None, water_only=None),
         help="Из всех загруженных водных полигонов собирается справочник «ООЗТ — водоём — тип — площадь» "
              "(water_catalog.csv в результатах). Мероприятие назначается полигонам, содержащим выбранные "
-             "по названию водоёмы (столбец «Водоёмы (только)»); пусто — все водоёмы. Для «принудительной "
-             "аэрации» в Битце мероприятие выключено столбцом «Вкл_Битца»."),
+             "по названию водоёмы (столбец «Водоёмы (только)»); пусто — все водоёмы."),
+    "water_ref": dict(
+        title="по справочнику водоёмов", data=["water_ref"], opt=["hydro", "wetlands"],
+        params=dict(),
+        help="Объекты берутся из справочника водоёмов и болот ООЗТ (Excel): строки с отметкой в столбце "
+             "кода мероприятия (I.8, I.9, I.11, III.7; отметка — 1, да, + или ●). Точка объекта (широта, "
+             "долгота WGS 84) привязывается к контуру: водоём — к полигону гидрографии, болото — к слою болот "
+             "(если нет — к гидрографии); сначала полигон, содержащий точку, затем ближайший не дальше 30 м. "
+             "ООЗТ и квартал определяются по геометрии (повторяющиеся номера кварталов Терлецкого массива "
+             "разделяются пространственно). Участок работ — контур объекта в границах ООЗТ; одна запись на "
+             "объект. Флаги «Вкл/выкл» и «Вкл_<ООЗТ>» действуют поверх справочника. Объекты без контура — "
+             "в water_ref_unmatched.csv."),
+    "struct_class": dict(
+        title="по структурному классу", data=[], opt=[],
+        params=dict(struct_classes=STRUCT_MOW_DEFAULT),
+        help="Назначается полигонам заданных структурных классов (столбец «Структурные классы»; по умолчанию — "
+             "суходольные, мезофитные и мезофитные антропогенные луга; гидроморфные луга не косят). Класс берётся "
+             "из поля «Структурный класс», выбранного в окне скрипта (если не задано — из полей типа и названия); "
+             "числовой код class_value (например, 5222) понимается по трём последним цифрам (222). Участок работ — "
+             "полигон экосистемы в границах ООЗТ."),
+    "rare_trail_vydel": dict(
+        title="виды КК: стихийные тропы в выделе", data=["species"], opt=["trails", "flowering"],
+        params=dict(category=None, groups=None, taxon=None, sources=None, kk_categories=(1, 2, 3),
+                    abs_m_ha=150.0, informal_only=True, vydel_min_ha=None, vydel_max_ha=None,
+                    season_flower=False),
+        help="Выдел любого типа назначается, если плотность стихийных троп в нём (длина троп OSM informal=yes "
+             "внутри выдела / площадь, м/га) больше порога (150 м/га) и в выделе есть находка вида Красной "
+             "книги Москвы заданных категорий (1–3; с учётом синонимов). Ограничение по площади выдела: «Мин. "
+             "площадь выдела» — больше, «Макс. площадь выдела» — не больше. «Сроки по цветению» = да — "
+             "сезонность записи берётся из справочника цветения (объединение месяцев видов выдела). Участок "
+             "работ — весь выдел."),
     "points_category": dict(
         title="точки по категории", data=["lesopat"], opt=[],
         params=dict(types=None, cat_value=REQ),
@@ -629,9 +710,9 @@ SPEC_COLUMNS = [
     ("min_share", "Мин. доля полигона, %", "мин. дол",
      "минимальная доля площади полигона под участками; пусто — общий порог из окна скрипта"),
     ("vydel_min_ha", "Мин. площадь выдела, га", "мин. площадь выдела",
-     "правило назначается только выделам не меньше этой площади (например, III.3 — от 0,5 га)"),
+     "правило назначается только выделам больше этой площади (например, III.3 — больше 5 га)"),
     ("vydel_max_ha", "Макс. площадь выдела, га", "макс. площадь выдела",
-     "правило назначается только выделам меньше этой площади (например, III.4 — до 0,5 га)"),
+     "правило назначается только выделам не больше этой площади (например, III.4 — не больше 5 га)"),
     ("abs_m_ha", "Плотность троп, м/га (порог)", "плотность троп",
      "абсолютный порог плотности троп в полигоне, м/га; пусто — квантиль"),
     ("water_only", "Водоёмы (только)", "водоемы (только)",
@@ -653,6 +734,13 @@ SPEC_COLUMNS = [
      "внутренний радиус полосы от дорожной сети (0 — от самих дорог)"),
     ("dist_max", "Буфер от дорог, макс., м", "буфер от дорог, макс",
      "внешний радиус полосы от дорожной сети"),
+    ("struct_classes", "Структурные классы", "структурные класс",
+     "структурные классы экосистем через запятую для правила «по структурному классу» (например, «Суходольные "
+     "луга, Мезофитные луга, Мезофитные луга (антропогенные)»); сравнение по названию целиком без учёта "
+     "регистра; коды class_value — по таблице кодов"),
+    ("season_flower", "Сроки по цветению", "сроки по цвет",
+     "«да» — сезонность записи по справочнику цветения охраняемых растений (объединение месяцев цветения "
+     "видов КК в выделе; плаун годичный — VII–VIII); «нет» или пусто — сезонность из столбца «Сезонность»"),
 ]
 SPEC_TITLE = {k: t for k, t, _, _ in SPEC_COLUMNS}
 DESC_COLUMN = "Процедура назначения (как работает скрипт)"
@@ -848,7 +936,11 @@ def _parse_value(key: str, raw):
                 return None, f"категория Красной книги должна быть от 0 до 5: {x}"
             vals.append(v)
         return vals, None
-    if key == "informal_only":                    # «да» / «нет»
+    if key == "struct_classes":                   # структурные классы — названия через запятую / «;»
+        if _is_any(t):
+            return None, None
+        return [x.strip() for x in re.split(r"[,;]", t) if x.strip()], None
+    if key in ("informal_only", "season_flower"):  # «да» / «нет»
         v = t.lower().replace("ё", "е")
         if v in ("да", "1", "истина", "true", "вкл", "только стихийные", "стихийные"):
             return True, None
@@ -960,6 +1052,11 @@ def measure_spec(measure: dict) -> dict:
             p[k], src[k] = None, "окно скрипта"
         else:
             p[k], src[k] = d, "по умолчанию"
+    if rule == "water_ref":
+        # объекты задаёт справочник водоёмов: прежние фильтры (типы, водоёмы только/кроме) не применяются
+        for k in ("types", "water_only", "water_except"):
+            p.pop(k, None)
+            src.pop(k, None)
     if rule == "wetland":
         # болота задаёт сам вектор: мероприятие назначается любому полигону,
         # пересекающему слой болот — столбец «Типы полигонов» не ограничивает
@@ -1042,8 +1139,7 @@ def describe_spec(spec: dict, full: bool = False) -> str:
         if r == "species":
             return f"находки видов ({sel}): полигоны с точками или полигонами находок{sdm}; {_types_txt(p)}"
         if r == "species_trails":
-            at = (f"; только выделы от {_fmt(p['vydel_min_ha'])} га" if p.get("vydel_min_ha") is not None else "") \
-                 + (f" до {_fmt(p['vydel_max_ha'])} га" if p.get("vydel_max_ha") is not None else "")
+            at = _vydel_area_txt(p, "; только выделы ")
             inf = "; только стихийные тропы OSM (informal=yes)" if p.get("informal_only") else ""
             return (f"тропы в {_fmt(p['dist'])} м от точек и в полигонах видов ({sel}){sdm}{at}{inf}; "
                     f"{_types_txt(p)}")
@@ -1059,6 +1155,15 @@ def describe_spec(spec: dict, full: bool = False) -> str:
             return f"водоёмы из справочника{wf}; {_types_txt(p)}"
         if r == "points_category":
             return f"точки лесопатологии (ПВН) категории «{p.get('cat_value')}»; {_types_txt(p)}"
+        if r == "water_ref":
+            return "объекты, отмеченные в справочнике водоёмов и болот ООЗТ (столбец кода мероприятия)"
+        if r == "struct_class":
+            return "полигоны структурных классов: " + ", ".join(p.get("struct_classes") or STRUCT_MOW_DEFAULT)
+        if r == "rare_trail_vydel":
+            kk = ", ".join(str(c) for c in (p.get("kk_categories") or []))
+            return (f"выделы с плотностью стихийных троп > {_fmt(p.get('abs_m_ha'))} м/га и находками видов КК "
+                    f"Москвы (кат. {kk}){_vydel_area_txt(p, '; выделы ')}"
+                    + ("; сроки — по справочнику цветения" if p.get("season_flower") else ""))
         if r == "kolokolchik":
             lo, hi = p.get("ring") or (500.0, 1000.0)
             return (f"зоны: кольцо {lo:.0f}–{hi:.0f} м от границы, полоса {_fmt(p['road_dist'])} м от дорог, "
@@ -1142,12 +1247,8 @@ def describe_spec(spec: dict, full: bool = False) -> str:
             z.append("сами полигоны находок")
         parts = [sp]
         if z:
-            at = ""
-            if p.get("vydel_min_ha") is not None or p.get("vydel_max_ha") is not None:
-                at = (f" Мероприятие назначается только полигонам площадью "
-                      + (f"от {_fmt(p['vydel_min_ha'])} га" if p.get("vydel_min_ha") is not None else "")
-                      + (" " if p.get("vydel_min_ha") is not None and p.get("vydel_max_ha") is not None else "")
-                      + (f"до {_fmt(p['vydel_max_ha'])} га" if p.get("vydel_max_ha") is not None else "") + ".")
+            at = _vydel_area_txt(p, " Мероприятие назначается только полигонам площадью ")
+            at = at + "." if at else ""
             parts.append(f"1) Зоны видов — {' и '.join(z)}. 2) Тропы ({trails}) обрезаются по этим зонам. "
                          "3) Мероприятие назначается каждому полигону, в котором есть хотя бы фрагмент таких "
                          "троп, без порогов длины и доли; в основании — виды, длина троп в зоне (м) и координаты "
@@ -1183,6 +1284,38 @@ def describe_spec(spec: dict, full: bool = False) -> str:
                 f"биотехния) либо используется готовый вектор с полем «Категория». Мероприятие назначается "
                 f"каждому полигону с точками категории «{p.get('cat_value')}»; в основании — номера ПВН, "
                 f"число точек и координаты WGS 84.")
+    if r == "water_ref":
+        return ("Данные: справочник водоёмов и болот ООЗТ (Excel, листы «Битца и Измайлово» и «Все ООЗТ Москвы»; "
+                "лист «Сводка» не читается), полигоны гидрографии и слой болот. 1) Берутся строки с отметкой в "
+                "столбце кода мероприятия (1, да, + или ●); строки «ИТОГО» и без координат пропускаются, дубли "
+                "(ООЗТ + квартал + название) объединяются. 2) Точка объекта (широта и долгота WGS 84) "
+                "привязывается к контуру: водоём — к полигону гидрографии, болото — к слою болот (если его нет — "
+                "к гидрографии); сначала полигон, содержащий точку, затем ближайший не дальше 30 м; не найденные "
+                "объекты записываются в water_ref_unmatched.csv и журнал. 3) ООЗТ и квартал определяются по "
+                "геометрии: запись получает выдел с наибольшим пересечением с контуром, квартал «N (Терлецкий)» — "
+                "квартал N Терлецкого массива. 4) Участок работ — контур объекта в границах ООЗТ; одна запись на "
+                "объект; в основании — название, тип, площадь по справочнику, квартал и примечание. Флаги "
+                "«Вкл/выкл» и «Вкл_<ООЗТ>» действуют поверх справочника; если отметок нет, мероприятие не "
+                "назначается (замены другим правилом нет).")
+    if r == "struct_class":
+        cls = ", ".join(p.get("struct_classes") or STRUCT_MOW_DEFAULT)
+        return (f"Назначается полигонам экосистем структурных классов: {cls}. Класс берётся из поля «Структурный "
+                "класс» слоя территории (выбирается в окне скрипта; если не задано — из полей типа и названия) и "
+                "сравнивается с названием целиком без учёта регистра и ё/е; числовой код class_value понимается "
+                "по трём последним цифрам (211, 212 — суходольные луга; 221, 223, 224 — мезофитные; 222 — "
+                "мезофитные антропогенные; 231–233 — гидроморфные). Участок работ — полигон экосистемы в "
+                "границах ООЗТ.")
+    if r == "rare_trail_vydel":
+        kk = ", ".join(str(c) for c in (p.get("kk_categories") or []))
+        at = _vydel_area_txt(p, " Учитываются только выделы площадью ")
+        return (f"{sp} Для каждого выдела любого типа считается плотность стихийных троп — длина троп OSM "
+                f"informal=yes внутри выдела, делённая на его площадь (м/га). Мероприятие назначается, если "
+                f"плотность больше {_fmt(p.get('abs_m_ha'))} м/га и в выделе есть хотя бы одна находка вида "
+                f"Красной книги Москвы категорий {kk} (названия сравниваются с учётом синонимов справочника "
+                f"цветения).{at + '.' if at else ''} Участок работ — весь выдел; в основании — виды и их "
+                "категории, плотность троп и площадь выдела."
+                + (" Сроки — по справочнику цветения: объединение месяцев цветения видов выдела "
+                   "(плаун годичный — VII–VIII)." if p.get("season_flower") else ""))
     if r == "kolokolchik":
         lo, hi = p.get("ring") or (500.0, 1000.0)
         return (f"Высаживание видов Красной книги в типичных местообитаниях. Зоны: кольцо "
@@ -1193,6 +1326,16 @@ def describe_spec(spec: dict, full: bool = False) -> str:
                 f"широколиственный лес — первоцветы и колокольчик широколиственный; луга естественные — "
                 f"колокольчики персиколистный и раскидистый; понижения и западины — купальница и калужница.")
     return ""
+
+
+def _vydel_area_txt(p: dict, prefix: str) -> str:
+    """Ограничение по площади выдела: «больше мин.» и «не больше макс.»."""
+    lo, hi = p.get("vydel_min_ha"), p.get("vydel_max_ha")
+    if lo is None and hi is None:
+        return ""
+    parts = ([f"больше {_fmt(lo)} га"] if lo is not None else []) + \
+            ([f"не больше {_fmt(hi)} га"] if hi is not None else [])
+    return prefix + " и ".join(parts)
 
 
 def describe_rule(measure: dict, full: bool = False) -> str:
@@ -1212,6 +1355,14 @@ def spec_params_lines(spec: dict) -> list[str]:
             val = ", ".join(SPECIES_KINDS[s] for s in v) if v else "точки, полигоны, SDM"
         elif k == "min_share":
             val = f"{_fmt(spec_share(spec['p']))}"
+        elif isinstance(v, bool):
+            val = "да" if v else "нет"
+        elif k == "ring" and isinstance(v, (tuple, list)):
+            val = f"{_fmt(v[0])}–{_fmt(v[1])}"
+        elif isinstance(v, (tuple, list)):
+            val = ", ".join(str(x) for x in v) if v else "любые"
+        elif isinstance(v, str):
+            val = v
         else:
             val = _fmt(v)
         out.append(f"{SPEC_TITLE[k]}: {val}  ({src})")
@@ -1220,6 +1371,8 @@ def spec_params_lines(spec: dict) -> list[str]:
 
 def _cfg_has(cfg: Config, key: str) -> bool:
     v = getattr(cfg, key, None)
+    if key in REF_DEFAULTS:                 # справочники: файл должен существовать
+        return bool(v) and Path(str(v)).exists()
     return bool(v) if not isinstance(v, list) else len(v) > 0
 
 
@@ -1241,7 +1394,8 @@ def matching_species_layers(cfg, p: dict, kinds=None) -> list[dict]:
 
 DATA_KEYS = {"dem": ["dem_path"], "trails": ["trails"], "hydro": ["hydro_lines", "hydro_polys"],
              "species": ["species"], "drainage": ["drainage"], "wetlands": ["wetlands"],
-             "roads": ["roads_paved", "trails"], "lesopat": ["lesopat_points"]}
+             "roads": ["roads_paved", "trails"], "lesopat": ["lesopat_points"],
+             "water_ref": ["water_ref"], "flowering": ["flowering_ref"]}
 
 
 _LESOPAT_PREVIEW_CACHE: dict = {}
@@ -1316,6 +1470,18 @@ def measure_status(measure: dict, cfg: Config, type_counts: dict | None = None) 
     if missing:
         return dict(base, state="missing", text="не хватает: " + "; ".join(missing))
     txt = "будет рассчитано"
+    if rule == "water_ref":
+        try:
+            _CUR_CFG_prev = globals().get("_CUR_CFG")
+            globals()["_CUR_CFG"] = cfg
+            wr = water_ref_marked(str(measure.get("code") or ""))
+            globals()["_CUR_CFG"] = _CUR_CFG_prev
+            if wr is not None:
+                txt += f" (отмечено в справочнике: {len(wr)})"
+                if wr.empty:
+                    return dict(base, state="missing", text="нет отметок в справочнике водоёмов")
+        except Exception:
+            pass
     if rule == "points_category" and _cfg_has(cfg, "lesopat_points"):
         ok_lp, lp_cnt, lp_warn = _lesopat_preview_counts(cfg.lesopat_points)
         if not ok_lp:
@@ -1353,6 +1519,10 @@ VEC_XLS_TYPES = [
 JSON_TYPES = [("Конфигурация", "*.json"), ("Все файлы", "*.*")]
 NONE_FIELD = "— нет —"
 
+# поле структурного класса (I.7 «Мозаичное выкашивание»): задаётся пользователем, необязательно
+STRUCT_FIELD, STRUCT_FIELD_TITLE = "STRUCT", "Структурный класс (для выкашивания)"
+STRUCT_FIELD_CANDS = ["Структурный класс", "Структурный_класс", "Struct_class", "STRUCT"]
+
 # поля слоя территории: ключ, подпись, обязательность, кандидаты для автоподбора
 FIELD_SPECS = {
     "kv_vyd": [
@@ -1361,6 +1531,7 @@ FIELD_SPECS = {
         ("VYD", "Выдел", True, ["VYD", "FID_ecosys", "vyd", "Выдел", "vydel"]),
         ("TYPE", "Тип (лес / луг / водные / околоводные)", True, ["Type", "TYPE", "Тип"]),
         ("NAME", "Название экосистемы", False, ["Name", "NAME", "Название", "Ecosystem"]),
+        (STRUCT_FIELD, STRUCT_FIELD_TITLE, False, STRUCT_FIELD_CANDS),
     ],
     "eco": [
         ("ID", "Уникальный ID экосистемы", True, ["ID", "Id", "id", "eco_id", "ECO_ID", "uid", "UID",
@@ -1368,6 +1539,7 @@ FIELD_SPECS = {
         ("TYPE", "Тип (лес / луг / водные / околоводные)", True, ["Type", "TYPE", "Тип"]),
         ("NAME", "Название экосистемы", False, ["Name", "NAME", "Название", "Ecosystem"]),
         ("OOZT", "ООЗТ (если поля нет — название ниже)", False, ["OOZT", "ООЗТ", "Name_OOZT"]),
+        (STRUCT_FIELD, STRUCT_FIELD_TITLE, False, STRUCT_FIELD_CANDS),
     ],
     # kv_cut: поля слоя экосистем; квартал и выдел назначаются разрезанием (kvnet_*)
     "kv_cut": [
@@ -1376,6 +1548,7 @@ FIELD_SPECS = {
         ("OOZT", "ООЗТ (если поля нет — из квартальной сети)", False, ["OOZT", "ООЗТ", "Name_OOZT"]),
         ("ID", "Исходный ID экосистемы (по желанию)", False, ["ID", "Id", "id", "eco_id", "ECO_ID", "uid",
                                                               "FID_ecosys", "fid_1"]),
+        (STRUCT_FIELD, STRUCT_FIELD_TITLE, False, STRUCT_FIELD_CANDS),
     ],
 }
 
@@ -2762,6 +2935,18 @@ try:
 except NameError:                        # Jupyter: __file__ не определён
     _REF_DIR = Path.cwd() / "refdata"
 _REF_CACHE: dict = {}
+# справочники Excel по умолчанию (поле Config → файл в refdata/)
+REF_DEFAULTS = {"water_ref": "Справочник_водоёмов_и_болот_ООЗТ_Москвы.xlsx",
+                "flowering_ref": "okhranyaemye_rasteniya_tsvetenie.xlsx"}
+
+
+def _ref_path(key: str) -> Path | None:
+    """Путь к справочнику: из текущей конфигурации, иначе — refdata/ по умолчанию."""
+    v = getattr(_CUR_CFG, key, None) if _CUR_CFG is not None else None
+    if v and Path(str(v)).exists():
+        return Path(str(v))
+    d = _REF_DIR / REF_DEFAULTS[key]
+    return d if (v is None or not str(v).strip()) and d.exists() else None
 
 
 def _norm_latin(s) -> str:
@@ -2804,10 +2989,327 @@ def kk_ref() -> dict:
     return ref
 
 
+def _latin_keys(s) -> list[str]:
+    """Ключи латинского названия для сравнения: полное (до 3 слов, без авторов в скобках), затем 2 слова.
+    «Dactylorhiza majalis baltica» → ['dactylorhiza majalis baltica', 'dactylorhiza majalis']."""
+    t = re.sub(r"\[.*?\]|\(.*?\)", " ", str(s or ""))
+    t = re.sub(r"(?i)\b(subsp|ssp|var|aggr?)\b\.?|\bs\.\s*(l|str)\.", " ", t)
+    raw = [p for p in re.split(r"[^A-Za-zÀ-ÿ-]+", t) if p]
+    parts = [p.lower() for p in raw]
+    keys = []
+    # третье слово — подвид (строчное), а не автор («Duch.», «L.»)
+    if len(raw) >= 3 and raw[2][:1].islower() and len(raw[2]) > 2:
+        keys.append(" ".join(parts[:3]))
+    if len(parts) >= 2:
+        keys.append(" ".join(parts[:2]))
+    elif parts:
+        keys.append(parts[0])
+    return list(dict.fromkeys(keys))
+
+
+# синонимы латинских названий (по умолчанию; дополняются справочником цветения, столбцы C/D)
+SYNONYMS_DEFAULT = [
+    ("Anthoxanthum nitens", "Hierochloe odorata"), ("Bistorta officinalis", "Bistorta major"),
+    ("Silene flos-cuculi", "Coccyganthe flos-cuculi"), ("Myosotis scorpioides", "Myosotis palustris"),
+    ("Viscaria vulgaris", "Steris viscaria"), ("Bromus benekenii", "Bromopsis benekenii"),
+    ("Dactylorhiza majalis baltica", "Dactylorhiza baltica"), ("Cota tinctoria", "Anthemis tinctoria"),
+    ("Neottia ovata", "Listera ovata"), ("Spinulum annotinum", "Lycopodium annotinum"),
+]
+
+
+def synonym_groups() -> dict:
+    """Ключ латинского названия → множество равноправных ключей (синонимы). Источники: справочник цветения
+    (столбцы «Латинское название (в слое)» и «… по справочнику ККМ»), refdata/species_synonyms.csv и
+    встроенный список."""
+    ck = ("_syn", str(_ref_path("flowering_ref")))
+    if ck in _REF_CACHE:
+        return _REF_CACHE[ck]
+    pairs = list(SYNONYMS_DEFAULT)
+    p = _REF_DIR / "species_synonyms.csv"
+    if p.exists():
+        try:
+            df = pd.read_csv(p, encoding="utf-8-sig")
+            c1, c2 = df.columns[:2]
+            pairs += [(a, b) for a, b in zip(df[c1], df[c2]) if str(a).strip() and str(b).strip()]
+        except Exception as e:
+            log.warning("Синонимы %s не прочитаны: %s", p.name, e)
+    pairs += flowering_ref().get("pairs", [])
+    groups: dict = {}
+    for a, b in pairs:
+        ka, kb = _latin_keys(a), _latin_keys(b)
+        if not ka or not kb or ka[0] == kb[0]:
+            continue
+        g = set(groups.get(ka[0], {ka[0]})) | set(groups.get(kb[0], {kb[0]}))
+        for k in list(g):
+            g |= groups.get(k, set())
+        for k in g:
+            groups[k] = g
+    _REF_CACHE[ck] = groups
+    return groups
+
+
+def _lookup_latin(species, ref: dict):
+    """Поиск вида в словаре по ключам названия; затем — по синонимам. Возвращает (значение, через_синоним)."""
+    keys = _latin_keys(species)
+    for k in keys:
+        if k in ref:
+            return ref[k], False
+    syn = synonym_groups()
+    for k in keys:
+        for k2 in sorted(syn.get(k, ())):
+            if k2 != k and k2 in ref:
+                return ref[k2], True
+            k2b = " ".join(k2.split()[:2])
+            if k2b != k and k2b in ref:
+                return ref[k2b], True
+    return None, False
+
+
 def kk_category(species):
-    """Категория Красной книги Москвы для вида: 0–5, «О» или NaN (вида нет в КК)."""
-    r = kk_ref().get(_norm_latin(species))
+    """Категория Красной книги Москвы для вида: 0–5, «О» или NaN (вида нет в КК). Синонимы равноправны."""
+    r, _ = _lookup_latin(species, kk_ref())
     return np.nan if r is None else r["cat"]
+
+
+def kk_via_synonym(species) -> bool:
+    """Вид найден в Красной книге Москвы только через синоним."""
+    r, syn = _lookup_latin(species, kk_ref())
+    return r is not None and syn
+
+
+# ---- месяцы (сезонность) ----------------------------------------------------------------
+ROMAN_MONTHS = ["I", "II", "III", "IV", "V", "VI", "VII", "VIII", "IX", "X", "XI", "XII"]
+_ROMAN_IDX = {r: i + 1 for i, r in enumerate(ROMAN_MONTHS)}
+
+
+def months_text(months) -> str:
+    """{5, 6, 7} → «V–VII»; {4, 5, 8} → «IV–V, VIII»."""
+    ms = sorted({int(m) for m in months if 1 <= int(m) <= 12})
+    out, i = [], 0
+    while i < len(ms):
+        j = i
+        while j + 1 < len(ms) and ms[j + 1] == ms[j] + 1:
+            j += 1
+        out.append(ROMAN_MONTHS[ms[i] - 1] if i == j else f"{ROMAN_MONTHS[ms[i] - 1]}–{ROMAN_MONTHS[ms[j] - 1]}")
+        i = j + 1
+    return ", ".join(out)
+
+
+def season_months(text):
+    """«IV–V, VIII» → {4, 5, 8}; текст не из римских месяцев → None. Диапазон через год (XII–III) — по кругу."""
+    t = str(text or "").strip()
+    if not t:
+        return set()
+    out = set()
+    for tok in re.split(r"[,;]\s*", t):
+        tok = tok.strip().upper().replace("—", "-").replace("–", "-")
+        if not tok:
+            continue
+        m = re.fullmatch(r"([IVX]+)\s*(?:-\s*([IVX]+))?", tok)
+        if not m or m.group(1) not in _ROMAN_IDX or (m.group(2) and m.group(2) not in _ROMAN_IDX):
+            return None
+        a = _ROMAN_IDX[m.group(1)]
+        b = _ROMAN_IDX[m.group(2)] if m.group(2) else a
+        k = a
+        while True:
+            out.add(k)
+            if k == b:
+                break
+            k = k % 12 + 1
+    return out
+
+
+def merge_seasons(values) -> str:
+    """Сезонность нескольких записей: римские месяцы — объединение («V–VII» + «VIII» → «V–VIII»),
+    иначе — уникальные значения через «; »."""
+    vals = [str(v).strip() for v in values
+            if v is not None and not (isinstance(v, float) and np.isnan(v)) and str(v).strip()
+            and str(v).strip().lower() != "nan"]
+    vals = list(dict.fromkeys(vals))
+    if len(vals) <= 1:
+        return vals[0] if vals else ""
+    sets = [season_months(v) for v in vals]
+    if all(x is not None for x in sets) and not any(12 in x and 1 in x for x in sets):
+        return months_text(set().union(*sets))
+    return "; ".join(vals)
+
+
+# ---- справочник цветения охраняемых растений ---------------------------------------------
+def flowering_ref() -> dict:
+    """Лист «Справочник»: {"months": ключ латинского названия → множество месяцев, "pairs": синонимы,
+    "kk": ключ → категория ККМ}. Оба латинских названия (в слое и по ККМ) — ключи."""
+    p = _ref_path("flowering_ref")
+    ck = ("_flow", str(p))
+    if ck in _REF_CACHE:
+        return _REF_CACHE[ck]
+    res = {"months": {}, "pairs": [], "kk": {}, "path": None}
+    _REF_CACHE[ck] = res
+    if p is None:
+        log.warning("Справочник цветения не найден — сроки III.4 по цветению и синонимы из него недоступны")
+        return res
+    try:
+        import openpyxl
+        wb = openpyxl.load_workbook(p, read_only=True, data_only=True)
+        ws = next((w for w in wb.worksheets if _norm_txt(w.title).startswith("справочник")), wb.worksheets[0])
+        rows = list(ws.iter_rows(values_only=True))
+        h_i = next(i for i, r in enumerate(rows[:10]) if any(_norm_txt(c).startswith("латинск") for c in r))
+        hdr = [_norm_txt(c) for c in rows[h_i]]
+        lat = [i for i, h in enumerate(hdr) if h.startswith("латинск")]
+        c_layer = next((i for i in lat if "в слое" in hdr[i]), lat[0])
+        c_kk = next((i for i in lat if i != c_layer), None)
+        c_cat = next((i for i, h in enumerate(hdr) if h.startswith("категория")), None)
+        mcols = {i: _ROMAN_IDX[str(rows[h_i][i]).strip().upper()] for i in range(len(hdr))
+                 if str(rows[h_i][i] or "").strip().upper() in _ROMAN_IDX}
+        n = 0
+        for r in rows[h_i + 1:]:
+            if not r or c_layer >= len(r) or not str(r[c_layer] or "").strip():
+                continue
+            names = [str(r[c_layer]).strip()] + ([str(r[c_kk]).strip()] if c_kk is not None and r[c_kk] else [])
+            ms = {m for i, m in mcols.items() if i < len(r) and str(r[i] or "").strip() not in ("", "-", "—")}
+            for nm in names:
+                for k in _latin_keys(nm):
+                    res["months"].setdefault(k, set()).update(ms)
+                    if c_cat is not None and r[c_cat] not in (None, ""):
+                        res["kk"].setdefault(k, str(r[c_cat]).strip())
+            if len(names) == 2 and _latin_keys(names[0])[:1] != _latin_keys(names[1])[:1]:
+                res["pairs"].append((names[0], names[1]))
+            n += 1
+        res["path"] = p
+        log.info("Справочник цветения %s: %d видов, синонимов — %d", p.name, n, len(res["pairs"]))
+    except Exception as e:
+        log.warning("Справочник цветения %s не прочитан: %s", p.name, e)
+    return res
+
+
+def flowering_months(species) -> set:
+    """Месяцы цветения вида по справочнику (с учётом синонимов); пусто — нет в справочнику."""
+    r, _ = _lookup_latin(species, flowering_ref()["months"])
+    return set(r or ())
+
+
+# ---- справочник водоёмов и болот ООЗТ ------------------------------------------------------
+WATER_REF_MARKS = {"1", "1.0", "да", "+", "●", "•", "yes", "true", "x", "х"}
+WATER_REF_SNAP_M = 30.0                # допуск привязки точки к ближайшему контуру, м
+WATER_REF_TERLETSKY_MAX_KV = 3         # в Терлецком массиве 3 квартала
+
+
+def _wr_val(v):
+    """Значение ячейки справочника: ошибки Excel (#REF! и т. п.) и пустые строки → None."""
+    if v is None:
+        return None
+    if isinstance(v, str):
+        t = v.strip()
+        if not t or t.startswith("#") or t.startswith("="):
+            return None
+        return t
+    if isinstance(v, float) and np.isnan(v):
+        return None
+    return v
+
+
+def _wr_mark(v) -> bool:
+    v = _wr_val(v)
+    if v is None:
+        return False
+    if isinstance(v, (int, float)) and not isinstance(v, bool):
+        return float(v) == 1.0
+    return _norm_txt(v) in WATER_REF_MARKS
+
+
+def read_water_ref(path) -> pd.DataFrame:
+    """Справочник водоёмов и болот ООЗТ → таблица объектов с отметками мероприятий.
+    Читаются листы «Битца и Измайлово» и «Все ООЗТ Москвы» («Сводка» — нет); заголовок — строка с «№ п/п»;
+    столбцы — по началу названия (без учёта регистра и ё/е), мероприятия — по коду в заголовке («I.9 …»).
+    Строки «ИТОГО» и без координат пропускаются; дубли (ООЗТ + квартал + название) объединяются по ИЛИ."""
+    import openpyxl
+    key = ("_wref", str(path), os.path.getmtime(path) if os.path.exists(path) else 0)
+    if key in _REF_CACHE:
+        return _REF_CACHE[key]
+    wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
+    recs, skipped = [], {"итого": 0, "без координат": 0}
+    for ws in wb.worksheets:
+        tn = _norm_txt(ws.title)
+        if not (tn.startswith("битца и измайлово") or tn.startswith("все оозт")):
+            continue
+        rows = list(ws.iter_rows(values_only=True))
+        h_i = next((i for i, r in enumerate(rows[:30])
+                    if any(_norm_txt(c).replace(" ", "") == "№п/п" for c in r)), None)
+        if h_i is None:
+            log.warning("Справочник водоёмов, лист «%s»: не найдена строка заголовка «№ п/п»", ws.title)
+            continue
+        hdr = [_norm_txt(c) for c in rows[h_i]]
+
+        def col(*stems):
+            for st in stems:
+                for i, h in enumerate(hdr):
+                    if h.startswith(st):
+                        return i
+            return None
+        c = dict(n=next(i for i, h in enumerate(hdr) if h.replace(" ", "") == "№п/п"),
+                 oozt=col("оозт"), kv=col("квартал"), name=col("название"), cat=col("категория"),
+                 otype=col("тип объекта", "тип"), area=col("площадь"), lat=col("широта"), lon=col("долгота"),
+                 note=col("примечание"))
+        mcols = {}
+        for i, h in enumerate(rows[h_i]):
+            m = re.match(r"^\s*([IVX]+\.\d+)\b", str(h or ""))
+            if m:
+                mcols[m.group(1)] = i
+        for ri, r in enumerate(rows[h_i + 1:], start=h_i + 2):
+            g = lambda k: _wr_val(r[c[k]]) if c.get(k) is not None and c[k] < len(r) else None
+            if any("итого" in _norm_txt(x) for x in r[:max(c["n"], c["name"] or 0) + 1] if x is not None):
+                skipped["итого"] += 1
+                continue
+            name = g("name")
+            if name is None:
+                continue
+            try:
+                lat, lon = float(str(g("lat")).replace(",", ".")), float(str(g("lon")).replace(",", "."))
+                if not (40 < lat < 70 and 20 < lon < 60):
+                    raise ValueError
+            except (TypeError, ValueError):
+                skipped["без координат"] += 1
+                continue
+            try:
+                area = float(str(g("area")).replace(",", "."))
+            except (TypeError, ValueError):
+                area = np.nan
+            recs.append(dict(sheet=ws.title, row=ri, oozt=str(g("oozt") or "").strip(),
+                             kv=str(g("kv") or "").strip().removesuffix(".0"), name=str(name).strip(),
+                             cat=str(g("cat") or "").strip(), otype=str(g("otype") or "").strip(),
+                             area=area, lat=lat, lon=lon, note=str(g("note") or "").strip(),
+                             **{f"m:{k}": _wr_mark(r[i]) if i < len(r) else False for k, i in mcols.items()}))
+    df = pd.DataFrame(recs)
+    if not df.empty:
+        mc = [x for x in df.columns if x.startswith("m:")]
+        df[mc] = df[mc].fillna(False).astype(bool)
+        df["_k"] = df["oozt"].map(_norm_txt) + "|" + df["kv"].map(_norm_txt) + "|" + df["name"].map(_norm_txt)
+        agg = {x: "first" for x in df.columns if x not in mc + ["_k", "note"]}
+        agg.update({x: "max" for x in mc})
+        agg["note"] = lambda s: "; ".join(dict.fromkeys(v for v in s if v))
+        n0 = len(df)
+        df = df.groupby("_k", as_index=False, sort=False).agg(agg)
+        if len(df) < n0:
+            log.info("Справочник водоёмов: дубли объединены (%d → %d строк)", n0, len(df))
+    log.info("Справочник водоёмов %s: %d объектов с координатами (пропущено: ИТОГО — %d, без координат — %d)",
+             Path(path).name, len(df), skipped["итого"], skipped["без координат"])
+    _REF_CACHE[key] = df
+    return df
+
+
+def water_ref_marked(code: str) -> pd.DataFrame | None:
+    """Объекты справочника, отмеченные для мероприятия code; None — справочник недоступен."""
+    p = _ref_path("water_ref")
+    if p is None:
+        return None
+    try:
+        df = read_water_ref(str(p))
+    except Exception as e:
+        log.error("Справочник водоёмов %s не прочитан: %s", p.name, e)
+        return None
+    col = f"m:{code}"
+    if df.empty or col not in df.columns:
+        return df.iloc[0:0] if not df.empty else df
+    return df[df[col]]
 
 
 def invasive_ref() -> dict:
@@ -3200,6 +3702,13 @@ class Data:
         if getattr(cfg, "split_multipart", True):
             g = _split_multipart(g)
         f = cfg.fields or {}
+        # поле «Структурный класс» (I.7): копия до переименования полей; cfg.fields ниже перезаписывается
+        f_struct = f.get(STRUCT_FIELD)
+        if f_struct and f_struct in g.columns:
+            g["Struct"] = g[f_struct].values
+        elif f_struct:
+            log.warning("Поле «Структурный класс» «%s» не найдено в слое территории", f_struct)
+            f_struct = None
         cols = list(g.columns)
 
         def pick(key, candidates, required=True):
@@ -3274,6 +3783,13 @@ class Data:
         g["VYD_SORT"] = _nat_rank(g["VYD"])
         g["Type"] = g["Type"].astype(str).str.strip()
         g["Name"] = g["Name"].astype(str).str.strip()
+        if f_struct and "Struct" in g.columns:
+            cfg.fields[STRUCT_FIELD] = f_struct
+            g["Struct"] = g["Struct"].map(struct_class_of)
+            log.info("Структурный класс — поле «%s»: %s", f_struct, ", ".join(
+                f"{k} — {v}" for k, v in g["Struct"].value_counts().head(12).items()))
+        else:
+            g["Struct"] = ""
         g["uid"] = g["OOZT"].astype(str) + "|" + g["KV"].astype(str) + "|" + g["VYD"].astype(str)
         g["area_ha"] = g.geometry.area / 1e4
         g = g.reset_index(drop=True)
@@ -3619,6 +4135,10 @@ class Data:
             col = l["field"] if l.get("field") in g.columns else detect_species_column(g)
             g["species"] = g[col].astype(str).str.strip() if col else g["__src"]
             g["kk_cat"] = g["species"].map(kk_category)      # категория Красной книги Москвы
+            n_syn = int(g["species"].map(kk_via_synonym).sum())
+            if n_syn:
+                log.info("Слой видов %s: %d находок распознаны в Красной книге через синоним (%s)", name, n_syn,
+                         ", ".join(sorted(g.loc[g["species"].map(kk_via_synonym), "species"].unique())[:6]))
             g["category"], g["group"], g["layer"] = l["category"], l["group"], i
             if col:
                 log.info("Слой видов %s (%s, %s): поле вида «%s», %d видов, %d объектов", name, tag,
@@ -3786,17 +4306,42 @@ def _compact_quarter_basis(bases: list[str]) -> str:
     return "; ".join(uniq[:4]) + f" (и ещё {len(uniq) - 4} уч. в квартале)"
 
 
+def _oozt_key_match(flag_key, oozt) -> bool:
+    """Ключ столбца «Вкл_<ООЗТ>» / ООЗТ справочника совпадает с ООЗТ слоя: точно, по началу
+    («Измайлово» ~ «Измайлово (юго-восточный массив)») или по общему корню из 4 букв («Битца» ~ «Битцевский лес»)."""
+    a, b = _norm_txt(flag_key), _norm_txt(oozt)
+    if not a or not b:
+        return False
+    if a == b or b.startswith(a) or a.startswith(b):
+        return True
+    return len(a) >= 4 and len(b) >= 4 and a[:4] == b[:4]
+
+
+def oozt_flag(measure: dict, oozt):
+    """Флаг «Вкл_<ООЗТ>» мероприятия для ООЗТ: True / False / None (нет ограничения)."""
+    flags = measure.get("oozt_on") or {}
+    if not flags:
+        return None
+    oo = str(oozt).strip()
+    if oo in flags:
+        return flags[oo]
+    for k, v in flags.items():
+        if _oozt_key_match(k, oo):
+            return v
+    return None
+
+
 class Results:
     def __init__(self):
         self.rows: list[dict] = []          # длинная таблица (+ геометрия участка работ _geom в WORK_EPSG)
         self.evidence: list[gpd.GeoDataFrame] = []
 
-    def add(self, vydel_row, measure: dict, basis: str, value=None, work_geom=None):
-        flags = measure.get("oozt_on") or {}
-        if flags:
-            oo = str(vydel_row["OOZT"]).strip()
-            if flags.get(oo) is False:        # мероприятие выключено для этой ООЗТ
-                return
+    def add(self, vydel_row, measure: dict, basis: str, value=None, work_geom=None,
+            season: str | None = None, obj=None) -> bool:
+        """Запись назначения. season — сезонность записи (вместо столбца таблицы); obj — идентификатор
+        объекта (водоём/болото справочника) для подсчёта «Объектов, шт». False — выключено флагом ООЗТ."""
+        if oozt_flag(measure, vydel_row["OOZT"]) is False:   # мероприятие выключено для этой ООЗТ
+            return False
         wg = work_geom if work_geom is not None else vydel_row.get("geometry")
         if wg is not None and not wg.is_empty:
             if wg.geom_type in ("Point", "MultiPoint", "LineString", "MultiLineString"):
@@ -3815,10 +4360,12 @@ class Results:
             "Тип выдела": vydel_row["Type"], "Экосистема": vydel_row["Name"],
             "Тип мероприятий": measure.get("group", ""), "Мероприятие": measure["name"],
             "Тип экосистемы мероприятия": measure.get("eco", ""),
-            "Пункт Приказа": measure.get("prikaz", ""), "Сезонность": measure.get("season", ""),
+            "Пункт Приказа": measure.get("prikaz", ""),
+            "Сезонность": season if season is not None else measure.get("season", ""),
             "Основание": basis, "Значение": value,
-            "_geom": wg, "_work_ha": work_ha,
+            "_geom": wg, "_work_ha": work_ha, "_obj": obj,
         })
+        return True
 
     def add_evidence(self, g: gpd.GeoDataFrame, measure_name: str, layer: str, label_col: str | None = None):
         if g is None or g.empty:
@@ -3840,7 +4387,7 @@ class Results:
         self.evidence.append(e)
 
     def long_table(self) -> pd.DataFrame:
-        df = pd.DataFrame([{k: v for k, v in r.items() if k != "_geom"} for r in self.rows])
+        df = pd.DataFrame([{k: v for k, v in r.items() if k not in ("_geom", "_obj")} for r in self.rows])
         if df.empty:
             return df
         # объединяем дубли (один выдел — одно мероприятие) с конкатенацией оснований
@@ -3848,7 +4395,7 @@ class Results:
         agg = df.groupby(key, as_index=False, sort=False).agg({
             "Тип выдела": "first", "Экосистема": "first", "Тип мероприятий": "first", "_sort": "first", "_vsort": "first",
             "Тип экосистемы мероприятия": "first",
-            "Пункт Приказа": "first", "Сезонность": "first",
+            "Пункт Приказа": "first", "Сезонность": merge_seasons,
             "Основание": lambda s: "; ".join(dict.fromkeys([x for x in s if x])),
             "Значение": "first",
         })
@@ -3865,7 +4412,7 @@ class Results:
             agg = agg.groupby(["ООЗТ", "Квартал", "Мероприятие"], as_index=False, sort=False).agg({
                 "Тип мероприятий": "first", "_sort": "first",
                 "Тип экосистемы мероприятия": "first",
-                "Пункт Приказа": "first", "Сезонность": "first",
+                "Пункт Приказа": "first", "Сезонность": merge_seasons,
                 "Основание": _compact_quarter_basis,
                 "Значение": _join_val,
             })
@@ -4241,7 +4788,17 @@ def _sp_label(p: dict, gen=False) -> str:
 
 
 def _taxon_mask(species: pd.Series, taxa) -> np.ndarray:
-    pat = "|".join(rf"\b{re.escape(t)}\b" for t in taxa)
+    """Вид относится к таксону (род / вид); для полных биномов учитываются синонимы."""
+    tt = list(taxa)
+    try:
+        syn = synonym_groups()
+        for t in list(tt):
+            ks = _latin_keys(t)
+            if ks and len(ks[0].split()) >= 2:
+                tt += [k for k in syn.get(ks[0], ()) if k not in tt]
+    except Exception:
+        pass
+    pat = "|".join(rf"\b{re.escape(t)}\b" for t in tt)
     return species.astype(str).str.contains(pat, case=False, regex=True).values
 
 
@@ -4350,7 +4907,13 @@ def rule_species(data: Data, res: Results, measure: dict, p: dict):
             wg = _safe_union(grp.geometry.values).buffer(15.0).intersection(r.geometry)
             res.add(r, measure, f"точечные находки: {', '.join(f'{k} ({v})' for k, v in sp.items())}; "
                                 f"координаты WGS 84: {'; '.join(coords)}", int(len(grp)), work_geom=wg)
-        res.add_evidence(j, measure["name"], f"{lab} — точки", "species")
+        # борщевик Сосновского: на схемах — все точки в границах территории (без прореживания)
+        if pts["species"].astype(str).str.contains("heracleum", case=False).any():
+            ev_pts = pts[pts.within(data.union)]
+            log.info("  точки борщевика в границах территории: %d (на схемах — все)", len(ev_pts))
+        else:
+            ev_pts = j
+        res.add_evidence(ev_pts, measure["name"], f"{lab} — точки", "species")
         log.info("  точки: %d %s", j["uid"].nunique(), _units())
     if polys is not None:
         j = _safe_overlay(polys, target[["uid", "geometry"]], how="intersection")
@@ -4384,11 +4947,10 @@ def rule_species_trails(data: Data, res: Results, measure: dict, p: dict):
     if amin is not None or amax is not None:
         before = len(target)
         if amin is not None:
-            target = target[target["area_ha"] >= float(amin)]
+            target = target[target["area_ha"] > float(amin)]
         if amax is not None:
-            target = target[target["area_ha"] < float(amax)]
-        area_txt = f"; площадь выдела от {_fmt(amin)}" if amin is not None else ""
-        area_txt += f" до {_fmt(amax)} га" if amax is not None else " га"
+            target = target[target["area_ha"] <= float(amax)]
+        area_txt = _vydel_area_txt(p, "; площадь выдела ")
         log.info("  по площади выдела: %d из %d %s", len(target), before, _units())
     zones = []
     if pts is not None:
@@ -4646,6 +5208,311 @@ def rule_water_catalog(data: Data, res: Results, measure: dict, p: dict):
     log.info("  водоёмы из справочника: %d шт.", len(sel))
 
 
+# ---- болота и пруды на схемах и в справочнике -----------------------------------------------
+_WETLAND_RE = r"wetland|болот|marsh|bog|swamp|fen\b|топь"
+
+
+def _wetland_flag(g: gpd.GeoDataFrame | None) -> pd.Series:
+    """Полигоны гидрографии с признаком болота (natural=wetland, тип «болото» и т. п.)."""
+    if g is None or g.empty:
+        return pd.Series(dtype=bool)
+    cols = [c for c in g.columns if c != "geometry" and str(c).lower() in
+            ("natural", "wetland", "water", "type", "тип", "landuse", "fclass", "category", "категория", "class")]
+    m = pd.Series(False, index=g.index)
+    for c in cols:
+        m |= g[c].astype(str).str.lower().str.contains(_WETLAND_RE, regex=True, na=False)
+    return m
+
+
+def wetland_polys(data) -> gpd.GeoDataFrame | None:
+    """Болота: слой болот (вектор) + полигоны гидрографии с признаком болота."""
+    parts = []
+    if getattr(data, "wetlands", None) is not None and not data.wetlands.empty:
+        w = data.wetlands[data.wetlands.geom_type.isin(["Polygon", "MultiPolygon"])]
+        parts.append(w[["geometry"]])
+    hp = getattr(data, "hydro_polys", None)
+    if hp is not None and not hp.empty:
+        f = _wetland_flag(hp)
+        if f.any():
+            parts.append(hp.loc[f, ["geometry"]])
+    if not parts:
+        return None
+    return gpd.GeoDataFrame(pd.concat(parts, ignore_index=True), crs=WORK_EPSG)
+
+
+def pond_polys(data) -> gpd.GeoDataFrame | None:
+    """Пруды и озёра: полигоны гидрографии без признака болота."""
+    hp = getattr(data, "hydro_polys", None)
+    if hp is None or hp.empty:
+        return hp
+    return hp[~_wetland_flag(hp)]
+
+
+WETLAND_COLOR = "#B4D796"     # болота на подложке схем (бледно-зелёный, RGB 180 215 150)
+
+
+# ---- I.8, I.9, I.11, III.7: объекты справочника водоёмов и болот ----------------------------
+def _wr_find_polygon(pt, layers):
+    """Контур для точки: полигон, содержащий точку (наименьший), иначе ближайший ≤ WATER_REF_SNAP_M."""
+    for L in layers:
+        if L is None or L.empty:
+            continue
+        cand = L[L.geometry.contains(pt)]
+        if not cand.empty:
+            i = cand.geometry.area.idxmin()
+            return L, i, 0.0
+    best = None
+    for L in layers:
+        if L is None or L.empty:
+            continue
+        near = L[L.geometry.intersects(pt.buffer(WATER_REF_SNAP_M))]
+        if near.empty:
+            continue
+        d = near.geometry.distance(pt)
+        i = d.idxmin()
+        if best is None or d[i] < best[2]:
+            best = (L, i, float(d[i]))
+    return best if best is not None else (None, None, None)
+
+
+def _wr_write_unmatched(data):
+    rows = data.__dict__.get("_wr_unmatched") or []
+    out = Path(data.cfg.out_dir) if getattr(data.cfg, "out_dir", "") else None
+    if out is None or not rows:
+        return
+    try:
+        out.mkdir(parents=True, exist_ok=True)
+        pd.DataFrame(rows).to_csv(out / "water_ref_unmatched.csv", index=False, encoding="utf-8-sig")
+    except Exception as e:
+        log.warning("  water_ref_unmatched.csv не записан: %s", e)
+
+
+def rule_water_ref(data: Data, res: Results, measure: dict, p: dict):
+    """Объекты справочника водоёмов и болот с отметкой мероприятия; участок работ — контур объекта ∩ ООЗТ."""
+    code = str(measure.get("code") or "").strip()
+    ref = water_ref_marked(code)
+    if ref is None:
+        log.warning("  %s: справочник водоёмов и болот не найден — пропуск", measure["name"])
+        return
+    if ref.empty:
+        log.warning("  %s: нет отметок в справочнике водоёмов (столбец %s) — мероприятие не назначается",
+                    measure["name"], code or "?")
+        return
+    pts = gpd.GeoDataFrame(ref.reset_index(drop=True),
+                           geometry=gpd.points_from_xy(ref["lon"], ref["lat"]), crs=4326).to_crs(WORK_EPSG)
+    near = pts.geometry.intersects(data.union.buffer(WATER_REF_SNAP_M))
+    n_out = int((~near).sum())
+    pts = pts[near]
+    if n_out:
+        log.info("  справочник: %d отмеченных объектов вне территории расчёта — не рассматриваются", n_out)
+    if pts.empty:
+        log.warning("  %s: в границах территории нет объектов, отмеченных в справочнике (%s)",
+                    measure["name"], code)
+        return
+    hp = data.hydro_polys if data.hydro_polys is not None and not data.hydro_polys.empty else None
+    wl = wetland_polys(data)
+    stats: dict = {}
+    unmatched = data.__dict__.setdefault("_wr_unmatched", [])
+    seen: dict = {}
+    ev_w, ev_b = [], []
+    for _, o in pts.iterrows():
+        is_bog = _norm_txt(o["cat"]).startswith("болот") or _norm_txt(o["otype"]).startswith("болот")
+        lbl = f"«{o['name']}» ({o['oozt']}, кв. {o['kv'] or '—'}; лист «{o['sheet']}», строка {o['row']})"
+        if code == "I.8" and not is_bog:
+            log.warning("  %s: непрофильная категория «%s» для I.8 (ожидается болото)", lbl, o["cat"] or "—")
+        if code in ("I.9", "I.11", "III.7") and is_bog:
+            log.warning("  %s: непрофильная категория «Болото» для %s", lbl, code)
+        layers = [wl, hp] if is_bog else [hp]
+        L, idx, dist = _wr_find_polygon(o.geometry, layers)
+        st_key = str(o["oozt"]) or "—"
+        stt = stats.setdefault(st_key, dict(marked=0, matched=0, unmatched=0, dropped=0))
+        stt["marked"] += 1
+        if L is None:
+            stt["unmatched"] += 1
+            unmatched.append(dict(Мероприятие=f"{code} {measure['name']}".strip(), ООЗТ=o["oozt"],
+                                  Квартал=o["kv"], Название=o["name"], Категория=o["cat"], Тип=o["otype"],
+                                  **{"Площадь, га": o["area"], "Широта": o["lat"], "Долгота": o["lon"],
+                                     "Лист": o["sheet"], "Строка Excel": o["row"],
+                                     "Причина": f"нет полигона {'болот/гидрографии' if is_bog else 'гидрографии'} "
+                                                f"под точкой и ближе {WATER_REF_SNAP_M:.0f} м"}))
+            log.warning("  %s: контур не найден (точка %.6f, %.6f) — в water_ref_unmatched.csv",
+                        lbl, o["lat"], o["lon"])
+            continue
+        geom = L.geometry.loc[idx]
+        if not geom.is_valid:
+            geom = make_valid(geom)
+        gkey = (id(L), idx)
+        if gkey in seen:                     # тот же контур уже назначен (дубль в справочнике)
+            log.info("  %s: контур совпадает с «%s» — одна запись на объект", lbl, seen[gkey])
+            stt["matched"] += 1
+            continue
+        if dist:
+            log.info("  %s: привязан к ближайшему контуру (%.0f м)", lbl, dist)
+        g_ha = geom.area / 1e4
+        if pd.notna(o["area"]) and o["area"] > 0 and g_ha > 0 and max(g_ha / o["area"], o["area"] / g_ha) > 2:
+            log.warning("  %s: площадь по справочнику %.3f га, контура — %.3f га (расхождение более 2 раз)",
+                        lbl, o["area"], g_ha)
+        wg = geom.intersection(data.union)
+        if wg.geom_type == "GeometryCollection":
+            pl = [x for x in wg.geoms if x.geom_type in ("Polygon", "MultiPolygon")]
+            wg = _safe_union(pl) if pl else wg
+        if wg.is_empty or wg.area < 1.0:
+            stt["unmatched"] += 1
+            unmatched.append(dict(Мероприятие=f"{code} {measure['name']}".strip(), ООЗТ=o["oozt"],
+                                  Квартал=o["kv"], Название=o["name"], Категория=o["cat"], Тип=o["otype"],
+                                  **{"Площадь, га": o["area"], "Широта": o["lat"], "Долгота": o["lon"],
+                                     "Лист": o["sheet"], "Строка Excel": o["row"],
+                                     "Причина": "контур вне границ территории"}))
+            continue
+        cand = data.oozt[data.oozt.geometry.intersects(wg)]
+        if cand.empty:
+            stt["unmatched"] += 1
+            continue
+        a = cand.geometry.intersection(wg).area
+        r = cand.loc[a.idxmax()]
+        oo_geo = str(r["OOZT"])
+        if o["oozt"] and not _oozt_key_match(o["oozt"], oo_geo):
+            log.warning("  %s: в справочнике ООЗТ «%s», по геометрии — «%s» (взято по геометрии)",
+                        lbl, o["oozt"], oo_geo)
+        mkv = re.match(r"^\s*(\d+)\s*(?:\((.*?)\))?", str(o["kv"]))
+        if mkv and mkv.group(2) and "терлец" in _norm_txt(mkv.group(2)) \
+                and int(mkv.group(1)) > WATER_REF_TERLETSKY_MAX_KV:
+            log.warning("  %s: в Терлецком массиве %d квартала — номер %s сомнителен",
+                        lbl, WATER_REF_TERLETSKY_MAX_KV, mkv.group(1))
+        if mkv and str(r["KV"]).removesuffix(".0") != mkv.group(1):
+            log.info("  %s: квартал по справочнику %s, по геометрии — %s (%s)", lbl, o["kv"], r["KV"], oo_geo)
+        if oozt_flag(measure, oo_geo) is False:
+            stt["dropped"] += 1
+            continue
+        area_txt = _fmt(o["area"], 3) if pd.notna(o["area"]) else _fmt(g_ha, 3)
+        kind = o["otype"] or o["cat"] or ("болото" if is_bog else "водоём")
+        basis = (f"по справочнику водоёмов и болот: «{o['name']}», {kind}, {area_txt} га; квартал {o['kv'] or '—'}"
+                 + (f"; {o['note']}" if o["note"] else ""))
+        ok = res.add(r, measure, basis, round(float(o["area"] if pd.notna(o["area"]) else g_ha), 3),
+                     work_geom=wg, obj=f"{o['sheet']}:{o['row']}")
+        if ok:
+            stt["matched"] += 1
+            seen[gkey] = o["name"]
+            (ev_b if is_bog else ev_w).append(dict(geometry=wg, label=o["name"], oozt=oo_geo))
+        else:
+            stt["dropped"] += 1
+    if ev_w:
+        res.add_evidence(gpd.GeoDataFrame(ev_w, crs=WORK_EPSG), measure["name"], "водные объекты — выбранные", "label")
+    if ev_b:
+        res.add_evidence(gpd.GeoDataFrame(ev_b, crs=WORK_EPSG), measure["name"], "болота — по справочнику", "label")
+    for oo, v in stats.items():
+        log.info("  справочник %s, %s: отмечено %d, привязано %d, не найдено %d, отброшено флагами %d",
+                 code, oo, v["marked"], v["matched"], v["unmatched"], v["dropped"])
+    _wr_write_unmatched(data)
+
+
+# ---- I.7: мозаичное выкашивание по структурному классу ----------------------------------------
+def rule_struct_class(data: Data, res: Results, measure: dict, p: dict):
+    """Полигоны заданных структурных классов; участок работ — полигон экосистемы ∩ ООЗТ."""
+    classes = list(p.get("struct_classes") or STRUCT_MOW_DEFAULT)
+    want = {_norm_txt(c): c for c in classes}
+    g = data.oozt
+    has_struct = "Struct" in g.columns and g["Struct"].astype(str).str.strip().ne("").any()
+    if not has_struct:
+        log.info("  поле «Структурный класс» не задано — класс определяется по полям типа и названия")
+    n = 0
+    for _, r in g.iterrows():
+        vals = [r["Struct"]] if has_struct else [struct_class_of(r["Type"]), struct_class_of(r["Name"])]
+        hit = next((v for v in vals if _norm_txt(v) in want), None)
+        if hit is None:
+            continue
+        wg = r.geometry.intersection(data.union)
+        if wg.is_empty:
+            continue
+        if res.add(r, measure, f"структурный класс «{hit}» ({wg.area / 1e4:.2f} га)",
+                   round(float(wg.area / 1e4), 2), work_geom=wg):
+            n += 1
+    log.info("  структурные классы (%s): → %d %s", ", ".join(classes), n, _units())
+
+
+# ---- III.3 / III.4: стихийные тропы в выделах с видами Красной книги ---------------------------
+def rule_rare_trail_vydel(data: Data, res: Results, measure: dict, p: dict):
+    """Выделы с плотностью стихийных троп > порога и находками видов КК Москвы заданных категорий."""
+    trails = data.trails_informal if p.get("informal_only", True) else data.trails
+    if trails is None or trails.empty:
+        log.warning("  %s: слой %s не загружен — пропуск", measure["name"],
+                    "стихийных троп OSM (informal=yes)" if p.get("informal_only", True) else "троп")
+        return
+    p_sel = dict(p, groups=None, sources=[s for s in (p.get("sources") or ["points", "polygons"]) if s != "sdm"]
+                 or ["points", "polygons"])
+    pts, polys, _ = select_species(data, p_sel)
+    groups = p.get("groups")
+
+    def _plants(g):
+        # сосудистые растения: группа слоя или вид из справочника цветения охраняемых растений
+        if g is None or g.empty or not groups:
+            return g
+        fl = flowering_ref()["months"]
+        m = g["group"].map(lambda x: group_matches(x, groups)).astype(bool) | \
+            g["species"].map(lambda sp: _lookup_latin(sp, fl)[0] is not None).astype(bool)
+        g = g[m]
+        return g if not g.empty else None
+    pts, polys = _plants(pts), _plants(polys)
+    if pts is None and polys is None:
+        log.warning("  %s: нет находок видов КК Москвы категорий %s", measure["name"],
+                    ", ".join(str(c) for c in p.get("kk_categories") or []))
+        return
+    thr = float(p.get("abs_m_ha") or 150.0)
+    target = data.oozt
+    amin, amax = p.get("vydel_min_ha"), p.get("vydel_max_ha")
+    if amin is not None:
+        target = target[target["area_ha"] > float(amin)]
+    if amax is not None:
+        target = target[target["area_ha"] <= float(amax)]
+    if target.empty:
+        return
+    tu = _safe_union(trails.geometry.values)
+    dens = (target.geometry.intersection(tu).length / target["area_ha"]).replace([np.inf], np.nan).fillna(0)
+    sel = target[dens > thr]
+    log.info("  выделов%s: %d; плотность стихийных троп > %g м/га — %d", _vydel_area_txt(p, " площадью "),
+             len(target), thr, len(sel))
+    n, ev_t, ev_p = 0, [], []
+    for (_, r), d in zip(sel.iterrows(), dens[dens > thr]):
+        finds = []
+        if pts is not None:
+            fp = pts[pts.geometry.within(r.geometry)]
+            finds.append(fp)
+            if not fp.empty:
+                ev_p.append(fp)
+        if polys is not None:
+            fq = polys[polys.geometry.intersects(r.geometry)]
+            fq = fq[fq.geometry.intersection(r.geometry).area > 1.0]
+            finds.append(fq)
+        f = pd.concat([x for x in finds if x is not None and not x.empty], ignore_index=True) \
+            if any(x is not None and not x.empty for x in finds) else None
+        if f is None or f.empty:
+            continue
+        sp = f.groupby("species")["kk_cat"].first()
+        season = None
+        if p.get("season_flower"):
+            ms, miss = set(), []
+            for s_ in sp.index:
+                m_ = flowering_months(s_)
+                (ms.update(m_) if m_ else miss.append(s_))
+            if miss:
+                log.warning("  нет сроков цветения в справочнике: %s", ", ".join(miss[:6]))
+            season = months_text(ms) if ms else None
+        sp_txt = ", ".join(f"{s_} (кат. {c})" for s_, c in sp.items())
+        basis = (f"виды КК Москвы: {sp_txt}; плотность стихийных троп {d:.0f} м/га > {thr:.0f} м/га; "
+                 f"площадь выдела {r['area_ha']:.2f} га" + (f"; сроки по цветению: {season}" if season else ""))
+        if res.add(r, measure, basis, round(float(d), 1), work_geom=r.geometry, season=season):
+            n += 1
+            ev_t.append(r.geometry)
+    if ev_t:
+        tt = trails[trails.intersects(_safe_union(ev_t))].copy()
+        tt["geometry"] = tt.geometry.intersection(_safe_union(ev_t))
+        res.add_evidence(tt[~tt.is_empty], measure["name"], "тропы в зонах повышенной плотности")
+        if ev_p:
+            res.add_evidence(gpd.GeoDataFrame(pd.concat(ev_p, ignore_index=True), crs=WORK_EPSG),
+                             measure["name"], "редкие виды — точки", "species")
+    log.info("  → %d %s", n, _units())
+
+
 def rule_points_category(data: Data, res: Results, measure: dict, p: dict):
     """Точки по категории (лесопатология): выделы леса, содержащие точки ПВН заданной категории."""
     if data.lesopat is None or data.lesopat.empty:
@@ -4825,7 +5692,8 @@ RULE_FUNCS = {
     "species_trails": rule_species_trails, "species_density": rule_species_density,
     "road_buffer": rule_road_buffer, "drainage": rule_drainage, "wetland": rule_wetland,
     "water_catalog": rule_water_catalog, "points_category": rule_points_category,
-    "kolokolchik": rule_kolokolchik,
+    "kolokolchik": rule_kolokolchik, "water_ref": rule_water_ref, "struct_class": rule_struct_class,
+    "rare_trail_vydel": rule_rare_trail_vydel,
 }
 
 
@@ -5012,8 +5880,20 @@ def update_measures_xlsx(path: str, cfg: Config | None = None, fill_from_method:
                                              "водные, околоводные, болотные", "любые"],
              "category": SPECIES_CATEGORIES + ["любые"], "groups": SPECIES_GROUPS[:-1] + ["любые"],
              "sources": ["точки", "полигоны", "SDM", "точки, полигоны", "любые"]}
-    for k, vals in lists.items():
+    # длинные списки (> 255 знаков Excel не принимает в формуле) — на скрытом листе «_списки»
+    if "_списки" in wb.sheetnames:
+        del wb["_списки"]
+    ls = None
+    for li, (k, vals) in enumerate(lists.items(), 1):
         f = '"' + ",".join(v.replace(", ", "; ") for v in vals) + '"'
+        if len(f) > 250:
+            if ls is None:
+                ls = wb.create_sheet("_списки")
+                ls.sheet_state = "hidden"
+            cl = get_column_letter(li)
+            for vi, v in enumerate(vals, 1):
+                ls[f"{cl}{vi}"] = v.replace(", ", "; ")
+            f = f"'_списки'!${cl}$1:${cl}${len(vals)}"
         dv = DataValidation(type="list", formula1=f, allow_blank=True, showErrorMessage=(k == "rule"),
                             errorTitle="Правило назначения",
                             error="Выберите правило из списка (см. лист «Справка по правилам»).")
@@ -5033,16 +5913,20 @@ def update_measures_xlsx(path: str, cfg: Config | None = None, fill_from_method:
             ("Правило назначения", "Что делает", "Нужные данные", "Параметры (по умолчанию)")]
     data_t = {"trails": "тропы", "hydro": "гидрография", "dem": "ЦМР", "species": "слои видов",
               "drainage": "дренажные канавы", "wetlands": "болота (вектор)",
-              "lesopat": "точки лесопатологии (ПВН)", "roads": "дороги с твёрдым покрытием"}
+              "lesopat": "точки лесопатологии (ПВН)", "roads": "дороги с твёрдым покрытием",
+              "water_ref": "справочник водоёмов и болот", "flowering": "справочник цветения"}
     for k, v in RULES.items():
         ps = []
         for pk, d in v["params"].items():
             dv_ = ("обязательно" if d == REQ else "общий порог из окна скрипта" if d == SHARED else
-                   "любые" if d is None else
-                   f"{_fmt(d[0])}–{_fmt(d[1])}" if isinstance(d, (tuple, list)) and len(d) == 2 else _fmt(d))
+                   "любые" if d is None else ("да" if d else "нет") if isinstance(d, bool) else
+                   f"{_fmt(d[0])}–{_fmt(d[1])}" if pk == "ring" else
+                   ", ".join(str(x) for x in d) if isinstance(d, (tuple, list)) else _fmt(d))
             ps.append(f"{SPEC_TITLE[pk]}: {dv_}")
         rows.append((v["title"], v["help"],
-                     ", ".join(data_t[d] for d in v["data"]) + (" (+ тропы, если есть)" if v["opt"] else "")
+                     ", ".join(data_t[d] for d in v["data"]) + ((" (+ " if v["data"] else "")
+                     + ", ".join(data_t[o] for o in v["opt"]) + (", если есть)" if v["data"] else ", если есть")
+                     if v["opt"] else "")
                      or "только слой территории", "; ".join(ps)))
     rows += [(None,) * 4, ("Столбец", "Что указывать", None, None)]
     rows += [(t, help_, None, None) for _, t, _, help_ in SPEC_COLUMNS]
@@ -5369,13 +6253,17 @@ def _plot_evidence_group(ax, handles: list, layer: str, grp: gpd.GeoDataFrame, o
     lbl = _legend_label(layer)
     if kind == "point":
         is_pvn = layer.startswith("лесопатология")
-        species_point = ("виды — точки" in layer or "Corvus — точки" in layer or is_pvn)
+        is_her = "heracleum" in layer.lower()
+        species_point = ("виды — точки" in layer or "Corvus — точки" in layer or is_pvn or is_her)
         if overview:
             pt_sz = 36 if is_pvn else (28 if species_point else 22)
             lg_sz = 8.5 if species_point else 7.5
         else:
             pt_sz = 72 if is_pvn else (60 if species_point else 42)
             lg_sz = 11.5 if species_point else 9.0
+        if is_her:                       # борщевик Сосновского — значок ×1,5
+            pt_sz *= 1.5
+            lg_sz *= 1.5 ** 0.5
         grp.plot(ax=ax, color=color, markersize=pt_sz, marker="D" if is_pvn else "o",
                  edgecolor="white", linewidth=0.7, zorder=7 if is_pvn else 6.5)
         handles.append(Line2D([], [], marker="D" if is_pvn else "o", color="w",
@@ -5425,7 +6313,10 @@ def _oozt_map_ctx(data: Data, oozt_name: str) -> dict | None:
     ext = (minx - pad, maxx + pad, miny - pad * 1.35, maxy + pad)
     w, h = ext[1] - ext[0], ext[3] - ext[2]
     fig_w, fig_h = _utm_figsize(w, h)
-    hp = gpd.clip(data.hydro_polys, geom) if (data.hydro_polys is not None and not data.hydro_polys.empty) else None
+    _pp = pond_polys(data)
+    hp = gpd.clip(_pp, geom) if (_pp is not None and not _pp.empty) else None
+    _wl = wetland_polys(data)
+    wl = gpd.clip(_wl, geom) if (_wl is not None and not _wl.empty) else None
     hl = gpd.clip(data.hydro_lines, geom) if (data.hydro_lines is not None and not data.hydro_lines.empty) else None
     paved = _paved_roads(data)
     dirt = None
@@ -5458,7 +6349,15 @@ def _oozt_map_ctx(data: Data, oozt_name: str) -> dict | None:
                     if kv_s not in seen_kv:
                         q_rows.append((kv_s, _safe_union(kg.geometry.values)))
     return dict(geom=geom, ext=ext, w=w, h=h, fig_w=fig_w, fig_h=fig_h,
-                hp=hp, hl=hl, tl=tl, it=it, pv=pv, q_rows=q_rows, basemap_cache=None)
+                hp=hp, wl=wl, hl=hl, tl=tl, it=it, pv=pv, q_rows=q_rows, basemap_cache=None)
+
+
+def _season_suffix(season) -> str:
+    """Сезонность в заголовке: « (V–VIII)»; если в тексте уже есть скобки — « — IV–VII (…)»."""
+    s = str(season or "").strip()
+    if not s:
+        return ""
+    return f" — {s}" if "(" in s else f" ({s})"
 
 
 def _measure_fig_name(oozt_name: str, idx: int, code: str, measure_name: str) -> str:
@@ -5473,7 +6372,7 @@ def _measure_fig_name(oozt_name: str, idx: int, code: str, measure_name: str) ->
 def draw_oozt(data: Data, evidence: gpd.GeoDataFrame | None, oozt_name: str, out_png: Path,
                basemap=True, ctx: dict | None = None, measure_name: str | None = None,
                measure_code: str = "", active_kvs: set[str] | None = None,
-               work_geoms: list | None = None):
+               work_geoms: list | None = None, measure_season: str = ""):
     """Схема на одно ООЗТ в проекции UTM Zone 37N (EPSG:32637, масштаб 1:1 без сжатия):
     при measure_name=None — общая обзорная схема по всем мероприятиям;
     при заданном measure_name — частная схема конкретного мероприятия с выделением кварталов и участков работ."""
@@ -5493,6 +6392,9 @@ def draw_oozt(data: Data, evidence: gpd.GeoDataFrame | None, oozt_name: str, out
     if ctx["hp"] is not None and not ctx["hp"].empty:
         ctx["hp"].plot(ax=ax, color="#A6CEE3", edgecolor="none", alpha=0.85, zorder=2)
         handles.append(Patch(facecolor="#A6CEE3", alpha=0.9, edgecolor="none", label="озёра и пруды"))
+    if ctx.get("wl") is not None and not ctx["wl"].empty:
+        ctx["wl"].plot(ax=ax, color=WETLAND_COLOR, edgecolor="none", alpha=0.9, zorder=2)
+        handles.append(Patch(facecolor=WETLAND_COLOR, alpha=0.9, edgecolor="none", label="болота"))
     if ctx["hl"] is not None and not ctx["hl"].empty:
         ctx["hl"].plot(ax=ax, color="#1F78B4", linewidth=0.9, alpha=0.9, zorder=2.5)
         handles.append(Line2D([], [], color="#1F78B4", linewidth=1.6, label="реки и канавы"))
@@ -5526,7 +6428,9 @@ def draw_oozt(data: Data, evidence: gpd.GeoDataFrame | None, oozt_name: str, out
                 ev_pts["layer"].astype(str) + "|" + pt_lbl + "|"
                 + pt_c.x.round(1).astype(str) + "|" + pt_c.y.round(1).astype(str)
             )
-            ev_pts = ev_pts.drop_duplicates("_dedup_k").drop(columns=["_dedup_k"])
+            # борщевик Сосновского — все точки, без прореживания совпадающих
+            her = ev_pts["layer"].astype(str).str.lower().str.contains("heracleum")
+            ev_pts = pd.concat([ev_pts[~her].drop_duplicates("_dedup_k"), ev_pts[her]]).drop(columns=["_dedup_k"])
         ev_nonpt = ev_src[~is_pt & ev_src.intersects(geom.buffer(1))].copy()
         if not ev_nonpt.empty:
             ev_nonpt = gpd.clip(ev_nonpt, geom.buffer(0.5))
@@ -5643,7 +6547,8 @@ def draw_oozt(data: Data, evidence: gpd.GeoDataFrame | None, oozt_name: str, out
     if measure_name is None:
         ax.set_title(f"{oozt_name}. Обзорная схема мероприятий", fontsize=14, fontweight="bold")
     else:
-        raw_title = f"{oozt_name}. {(measure_code + ' ') if measure_code else ''}{measure_name}"
+        raw_title = f"{oozt_name}. {(measure_code + ' ') if measure_code else ''}{measure_name}" \
+            + _season_suffix(measure_season)
         wrapped_t = textwrap.fill(raw_title, width=56, break_long_words=False, break_on_hyphens=False)
         t_fs = 12.0 if "\n" in wrapped_t else 13.5
         ax.set_title(wrapped_t, fontsize=t_fs, fontweight="bold", pad=10)
@@ -5762,11 +6667,18 @@ def draw_kvartal(data: Data, evidence: gpd.GeoDataFrame | None, kv, oozt_name, o
                                           markersize=7, label="рекреационные объекты"))
         except Exception as e:
             log.warning("  тепловая карта рекреации не построена: %s", e)
-    if data.hydro_polys is not None and not data.hydro_polys.empty:
-        hp = gpd.clip(data.hydro_polys, u)
+    _pp = pond_polys(data)
+    if _pp is not None and not _pp.empty:
+        hp = gpd.clip(_pp, u)
         if not hp.empty:
             hp.plot(ax=ax, color="#A6CEE3", edgecolor="none", alpha=0.85, zorder=2)
             handles.append(Patch(facecolor="#A6CEE3", alpha=0.9, edgecolor="none", label="озёра и пруды"))
+    _wl = wetland_polys(data)
+    if _wl is not None and not _wl.empty:
+        wl = gpd.clip(_wl, u)
+        if not wl.empty:
+            wl.plot(ax=ax, color=WETLAND_COLOR, edgecolor="none", alpha=0.9, zorder=2)
+            handles.append(Patch(facecolor=WETLAND_COLOR, alpha=0.9, edgecolor="none", label="болота"))
     if data.hydro_lines is not None and not data.hydro_lines.empty:
         hl = gpd.clip(data.hydro_lines, u)
         if not hl.empty:
@@ -6149,11 +7061,16 @@ def oozt_measure_summary(data: Data, table: pd.DataFrame, units: pd.DataFrame,
     cols = [
         "ООЗТ", "Площадь ООЗТ, га", "Тип мероприятий", "Мероприятие", "Пункт Приказа",
         "Кварталов с мероприятием, шт", "% кварталов ООЗТ",
-        "Участков проведения, шт", "Площадь проведения, га", "% от площади ООЗТ",
+        "Участков проведения, шт", "Объектов, шт", "Площадь проведения, га", "% от площади ООЗТ",
     ]
     if units is None or units.empty:
         return pd.DataFrame(columns=cols)
     areas = _oozt_areas(data)
+    # «Объектов, шт» — уникальные объекты справочника водоёмов и болот (правило water_ref)
+    n_obj: dict = {}
+    for r_ in (res.rows if res is not None else []):
+        if r_.get("_obj") is not None:
+            n_obj.setdefault((str(r_["ООЗТ"]), str(r_["Мероприятие"])), set()).add(r_["_obj"])
     cov_om = _covered_ha_by_group(data, units, ["ООЗТ", "Мероприятие"], res=res, measures_gdf=measures_gdf)
     u = units.copy()
     u["ООЗТ"] = u["ООЗТ"].astype(str)
@@ -6178,6 +7095,8 @@ def oozt_measure_summary(data: Data, table: pd.DataFrame, units: pd.DataFrame,
         }
     )
     g["Площадь ООЗТ, га"] = [areas.get(o, (0.0, 0))[0] for o in g["ООЗТ"]]
+    g["Объектов, шт"] = [len(n_obj[(str(o), str(m))]) if (str(o), str(m)) in n_obj else None
+                        for o, m in zip(g["ООЗТ"], g["Мероприятие"])]
     g["% кварталов ООЗТ"] = [
         round(100.0 * k / areas[o][1], 1) if o in areas and areas[o][1] else None
         for o, k in zip(g["ООЗТ"], g["Кварталов с мероприятием, шт"])
@@ -6712,18 +7631,21 @@ def _report_blocks(data: Data, table: pd.DataFrame, evidence, rep: Path, kv_all:
                 kvs_raw = [str(x).removesuffix(".0") for x in sub_m["Квартал"].dropna().unique()]
                 kvs_sorted = [kvs_raw[i] for i in np.argsort(_nat_rank(kvs_raw))] if kvs_raw else []
                 wgs_m = work_by_om.get((str(oo), str(m_name)), [])
+                season_m = merge_seasons(sub_m["Сезонность"]) if "Сезонность" in sub_m.columns else ""
                 if draw:
                     log.info("  Частная схема [%d/%d]: %s — %s", m_idx, len(ord_ms), oo, m_name)
                     try:
                         draw_oozt(data, evidence, oo, png_m, basemap=basemap, ctx=ctx_oo,
                                   measure_name=m_name, measure_code=m_code,
-                                  active_kvs=set(kvs_sorted), work_geoms=wgs_m)
+                                  active_kvs=set(kvs_sorted), work_geoms=wgs_m,
+                                  measure_season=season_m)
                     except Exception as e:
                         log.warning("  Частная схема %s (%s) не построена: %s", oo, m_name, e)
                 if png_m.exists():
                     lbl_code = f"{m_code} " if m_code else ""
                     B += [("break",),
-                          ("h", 2, f"{oo}. Мероприятие: {lbl_code}{m_name}"),
+                          ("h", 2, f"{oo}. Мероприятие: {lbl_code}{m_name}"
+                                     + _season_suffix(season_m)),
                           ("img", png_m)]
                     area_m, pct_m = ms_lookup.get((str(oo), str(m_name)), (None, None))
                     if area_m is None and wgs_m:
@@ -7535,7 +8457,8 @@ def write_qgis_project(out: Path, cfg: Config, data: "Data", gpkg: Path, terr_la
     _CTX_TITLE = {"rivers_ditches": "Реки и канавы", "lakes_ponds": "Озёра и пруды",
                   "roads_paved": "Дороги с твёрдым покрытием", "roads_dirt": "Дороги грунтовые",
                   "contours": "Горизонтали (2,5 м)", "recreation_points": "Рекреация: объекты",
-                  "informal_trails": "Стихийные тропы OSM", "pvn_points": "Лесопатология: все точки ПВН"}
+                  "informal_trails": "Стихийные тропы OSM", "pvn_points": "Лесопатология: все точки ПВН",
+                  "wetlands": "Болота"}
     ctx_by_name = {}
     for c in ctx_layers:
         nm = c["name"]
@@ -7561,7 +8484,8 @@ def write_qgis_project(out: Path, cfg: Config, data: "Data", gpkg: Path, terr_la
     src_nodes = []
     for title, key, geom, color in (("Тропы", "trails", "line", "#707070"),
                                     ("Гидрография — линии", "hydro_lines", "line", "#1F78B4"),
-                                    ("Гидрография — полигоны", "hydro_polys", "poly", "#A6CEE3")):
+                                    ("Гидрография — полигоны", "hydro_polys", "poly", "#A6CEE3"),
+                                    ("Болота (вектор)", "wetlands", "poly", WETLAND_COLOR)):
         for pth in getattr(cfg, key) or []:
             pth = Path(pth)
             try:
@@ -7624,7 +8548,7 @@ def write_qgis_project(out: Path, cfg: Config, data: "Data", gpkg: Path, terr_la
     elif ev_nodes:
         tree.append(group("Основания назначения", ev_nodes))
     # порядок подложки (сверху вниз): дороги, горизонтали, гидрография, рекреация, тропы
-    for nm in ("roads_paved", "roads_dirt", "contours", "rivers_ditches", "lakes_ponds"):
+    for nm in ("roads_paved", "roads_dirt", "contours", "rivers_ditches", "lakes_ponds", "wetlands"):
         if nm in ctx_by_name:
             tree.append(ctx_by_name[nm])
     if heat_node:
@@ -7704,6 +8628,7 @@ def report_only(cfg: Config):
     data.roads_dirt = read_many(cfg.roads_dirt, data.bbox_wgs84, data.clip)
     data.hydro_lines = read_many(cfg.hydro_lines, data.bbox_wgs84, data.clip)
     data.hydro_polys = read_many(cfg.hydro_polys, data.bbox_wgs84, data.clip)
+    data.wetlands = read_many(cfg.wetlands, data.bbox_wgs84, data.clip)
     data.rec_points = read_many(cfg.recreation, data.bbox_wgs84, data.clip)
     data.lesopat = data._load_lesopat()
     if cfg.dem_path:
@@ -8024,7 +8949,8 @@ def run(cfg: Config):
                 pvn_keep = [c for c in ("pvn", "kv", "vyd", "state", "recomend", "recs") if c in data.lesopat_all.columns]
                 _ctx_write("pvn_points", data.lesopat_all, "point", "#d62728", clip_to_oozt=False, keep_cols=pvn_keep)
             _ctx_write("rivers_ditches", data.hydro_lines, "line", "#1F78B4", width=0.8)
-            _ctx_write("lakes_ponds", data.hydro_polys, "poly", "#A6CEE3", alpha=0.85)
+            _ctx_write("lakes_ponds", pond_polys(data), "poly", "#A6CEE3", alpha=0.85)
+            _ctx_write("wetlands", wetland_polys(data), "poly", WETLAND_COLOR, alpha=0.9)
             paved = _paved_roads(data)
             _ctx_write("roads_paved", paved, "line", "#5f6368", width=1.5)
             if data.roads_dirt is not None and not data.roads_dirt.empty:
