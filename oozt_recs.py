@@ -355,7 +355,7 @@ class Config:
     sheet_size_m: float = 1000.0         # eco: размер листа сетки для схем, м
     dem_path: str | None = None
     trails: list[str] = field(default_factory=list)
-    informal_trails: list = field(default_factory=lambda: ["auto"])   # «auto» — скачать из OSM (informal=yes); иначе пути к файлам
+    informal_trails: list = field(default_factory=lambda: ["auto"])   # ["auto"] — скачать из OSM (informal=yes); список путей — свой слой; [] — не использовать
     roads_paved: list[str] = field(default_factory=list)   # дороги с твёрдым покрытием: «Колокольчик», карты
     roads_dirt: list[str] = field(default_factory=list)   # грунтовые дороги: «Колокольчик», карты
     hydro_lines: list[str] = field(default_factory=list)
@@ -658,8 +658,8 @@ RULES = {
         params=dict(category=None, groups=None, taxon=None, sources=None, kk_categories=(1, 2, 3),
                     abs_m_ha=100.0, informal_only=True, vydel_min_ha=None, vydel_max_ha=None,
                     season_flower=False),
-        help="Выдел любого типа назначается, если плотность стихийных троп в нём (длина троп OSM informal=yes "
-             "внутри выдела / площадь, м/га) больше порога (100 м/га) и в выделе есть находка вида Красной "
+        help="Выдел любого типа назначается, если плотность стихийных троп в нём (длина стихийных троп — OSM "
+             "informal=yes или свой слой — внутри выдела / площадь, м/га) больше порога (100 м/га) и в выделе есть находка вида Красной "
              "книги Москвы заданных категорий (1–3; с учётом синонимов). Ограничение по площади выдела: «Мин. "
              "площадь выдела» — больше, «Макс. площадь выдела» — не больше. «Сроки по цветению» = да — "
              "сезонность записи берётся из справочника цветения (объединение месяцев видов выдела). Участок "
@@ -698,8 +698,8 @@ SPEC_COLUMNS = [
      "категории Красной книги Москвы (0–5, «О») через запятую; например «1, 2, 3» — под угрозой исчезновения, "
      "редкие и уязвимые; пусто — без учёта Красной книги"),
     ("informal_only", "Только стихийные тропы", "только стихийные троп",
-     "«да» — тропы у находок считаются только по слою стихийных троп OSM (informal=yes, скачивается "
-     "автоматически); «нет» или пусто — по всей дорожно-тропиночной сети"),
+     "«да» — тропы у находок считаются только по слою стихийных троп (скачивается из OSM informal=yes "
+     "или выбирается свой слой в окне); «нет» или пусто — по всей дорожно-тропиночной сети"),
     ("sources", "Виды: данные", "виды: данн", "точки, полигоны, SDM (через запятую); «любые» или пусто — все"),
     ("dist", "Расстояние, м", "расстоян", "ширина полосы у воды или радиус вокруг точек видов"),
     ("window", "Окно плотности, м", "окно", "радиус скользящего окна для растра плотности"),
@@ -1308,8 +1308,8 @@ def describe_spec(spec: dict, full: bool = False) -> str:
     if r == "rare_trail_vydel":
         kk = ", ".join(str(c) for c in (p.get("kk_categories") or []))
         at = _vydel_area_txt(p, " Учитываются только выделы площадью ")
-        return (f"{sp} Для каждого выдела любого типа считается плотность стихийных троп — длина троп OSM "
-                f"informal=yes внутри выдела, делённая на его площадь (м/га). Мероприятие назначается, если "
+        return (f"{sp} Для каждого выдела любого типа считается плотность стихийных троп — длина стихийных "
+                f"троп (OSM informal=yes или свой слой) внутри выдела, делённая на его площадь (м/га). Мероприятие назначается, если "
                 f"плотность больше {_fmt(p.get('abs_m_ha'))} м/га и в выделе есть хотя бы одна находка вида "
                 f"Красной книги Москвы категорий {kk} (названия сравниваются с учётом синонимов справочника "
                 f"цветения).{at + '.' if at else ''} Участок работ — весь выдел; в основании — виды и их "
@@ -1766,10 +1766,25 @@ class SetupWindow:
                   ).pack(anchor="w", pady=(0, 4))
         for spec in LAYER_SPECS:
             self._layer_row(s3, spec)
-        self.v_informal = tk.BooleanVar(value=True)
-        ttk.Checkbutton(s3, text="Стихийные тропы: скачивать из OSM (informal=yes; нужен интернет) — "
-                                "слой для мероприятий со столбцом «Только стихийные тропы» = да",
-                        variable=self.v_informal).pack(anchor="w", pady=(6, 0))
+        # стихийные тропы: скачать из OSM / свой слой / не использовать
+        fi = ttk.Frame(s3)
+        fi.pack(fill="x", pady=(6, 0))
+        ttk.Label(fi, text="Стихийные тропы (для мероприятий со столбцом «Только стихийные тропы» = да):",
+                  wraplength=600, justify="left").grid(row=0, column=0, columnspan=2, sticky="w")
+        self.v_inf_mode = tk.StringVar(value="auto")
+        self._inf_files: list[str] = []
+        ttk.Radiobutton(fi, text="скачать из OSM (informal=yes; нужен интернет)", value="auto",
+                        variable=self.v_inf_mode, command=self._inf_changed).grid(row=1, column=0, sticky="w")
+        f_own = ttk.Frame(fi)
+        f_own.grid(row=2, column=0, columnspan=2, sticky="w")
+        ttk.Radiobutton(f_own, text="свой слой", value="files",
+                        variable=self.v_inf_mode, command=self._inf_changed).pack(side="left")
+        ttk.Button(f_own, text="Выбрать…", command=self._pick_informal).pack(side="left", padx=(8, 0))
+        ttk.Radiobutton(fi, text="не использовать", value="none",
+                        variable=self.v_inf_mode, command=self._inf_changed).grid(row=3, column=0, sticky="w")
+        self.l_inf = ttk.Label(fi, foreground=self.C_MUTED, font=self.f_small, wraplength=600, justify="left")
+        self.l_inf.grid(row=4, column=0, columnspan=2, sticky="w")
+        self._inf_changed()
         self._species_block(s3)
 
         # ---- правая колонка
@@ -2091,6 +2106,30 @@ class SetupWindow:
         self._refresh()
         messagebox.showinfo("Таблица мероприятий", info, parent=self.root)
 
+    # ------------------------------------------------------------------ стихийные тропы
+    def _inf_changed(self):
+        m = self.v_inf_mode.get()
+        if m == "files" and not self._inf_files:
+            txt = "свой слой не выбран — нажмите «Выбрать…» (линии; можно несколько файлов)"
+        elif m == "files":
+            txt = "свой слой: " + "; ".join(Path(x).name for x in self._inf_files)
+        elif m == "auto":
+            txt = "будут скачаны линии OSM с тегом informal=yes в границах территории"
+        else:
+            txt = "стихийные тропы не используются — мероприятия с «Только стихийные тропы» = да не назначаются"
+        self.l_inf.configure(text=txt)
+
+    def _pick_informal(self):
+        ps = self._ask("vec", True, "Стихийные тропы — линейный слой (можно несколько файлов)")
+        if ps:
+            self._inf_files = ps
+            self.v_inf_mode.set("files")
+        self._inf_changed()
+        try:
+            self._refresh()
+        except Exception:
+            pass
+
     # ------------------------------------------------------------------ выбор файлов
     def _ask(self, kind, multi, title):
         from tkinter import filedialog
@@ -2277,7 +2316,9 @@ class SetupWindow:
         c.report_kv = [int(x) if x.isdigit() else x for x in c.report_kv]
         c.basemap = bool(self.v_basemap.get())
         c.split_multipart = bool(self.v_split.get())
-        c.informal_trails = ["auto"] if self.v_informal.get() else []
+        _im = self.v_inf_mode.get()
+        c.informal_trails = (["auto"] if _im == "auto" else
+                             list(self._inf_files) if _im == "files" else [])
         try:
             c.min_share_pct = max(0.0, float(self.v_minshare.get().replace(",", ".") or 0))
         except ValueError:
@@ -2408,7 +2449,10 @@ class SetupWindow:
         self.v_kv.set(", ".join(map(str, cfg.report_kv or [])))
         self.v_basemap.set(bool(cfg.basemap))
         self.v_split.set(bool(getattr(cfg, "split_multipart", True)))
-        self.v_informal.set("auto" in (cfg.informal_trails or []))
+        _inf = [str(x).strip() for x in (cfg.informal_trails or []) if str(x).strip()]
+        self._inf_files = [x for x in _inf if x.lower() not in ("auto", "авто", "osm")]
+        self.v_inf_mode.set("files" if self._inf_files else "auto" if _inf else "none")
+        self._inf_changed()
         self.v_minshare.set(f"{float(getattr(cfg, 'min_share_pct', 25.0)):g}")
         for k, v in self.v_formats.items():
             v.set(k in (cfg.report_formats or []))
@@ -4093,15 +4137,22 @@ class Data:
             except Exception as e:
                 log.warning("Стихийные тропы: скачивание из OSM не удалось (%s)", e)
         if not files:
+            if not paths:
+                log.info("Стихийные тропы: не используются (выбрано «не использовать»)")
             return None
+        own = [x for x in files if not Path(x).name.startswith("informal_trails_osm")]
+        if own:
+            log.info("Стихийные тропы: свой слой — %s", "; ".join(Path(x).name for x in own))
         g = read_many(files, self.bbox_wgs84, self.clip)
         if g is None or g.empty:
+            log.warning("Стихийные тропы: в выбранных файлах нет объектов в границах территории")
             return None
         g = repair_geometries(g)          # make_valid: защита от TopologyException
         if g is None or g.empty:
             return None
         g = g[g.geom_type.isin(["LineString", "MultiLineString"])].copy()
         if g.empty:
+            log.warning("Стихийные тропы: в выбранных файлах нет линий")
             return None
         log.info("Стихийные тропы: %d сегментов (слой для правил «только стихийные тропы»)", len(g))
         return g
@@ -4545,6 +4596,12 @@ def write_diagnostics(out: Path, data, res):
     log.info("Итог по мероприятиям × ООЗТ: %s. Подробно: diagnostics.xlsx / diagnostics.txt",
              ", ".join(f"{k} — {v}" for k, v in cnt.items()))
     return df
+
+
+def _inf_label() -> str:
+    """Подпись слоя стихийных троп: «… OSM» при автоскачивании, «… (свой слой)» при своём файле."""
+    v = [str(x).strip().lower() for x in (getattr(_CUR_CFG, "informal_trails", None) or ["auto"])]
+    return "стихийные тропы OSM" if any(x in ("auto", "авто", "osm") for x in v) else "стихийные тропы (свой слой)"
 
 
 class Results:
@@ -5678,7 +5735,7 @@ def rule_rare_trail_vydel(data: Data, res: Results, measure: dict, p: dict):
     trails = data.trails_informal if p.get("informal_only", True) else data.trails
     if trails is None or trails.empty:
         log.warning("  %s: слой %s не загружен — пропуск", measure["name"],
-                    "стихийных троп OSM (informal=yes)" if p.get("informal_only", True) else "троп")
+                    "стихийных троп (OSM informal=yes или свой слой)" if p.get("informal_only", True) else "троп")
         return
     p_sel = dict(p, groups=None, sources=[s for s in (p.get("sources") or ["points", "polygons"]) if s != "sdm"]
                  or ["points", "polygons"])
@@ -6662,7 +6719,7 @@ def draw_oozt(data: Data, evidence: gpd.GeoDataFrame | None, oozt_name: str, out
         handles.append(Line2D([], [], color="#b5b5b5", linewidth=1.0, label="грунтовые дороги и тропы"))
     if ctx["it"] is not None and not ctx["it"].empty:
         ctx["it"].plot(ax=ax, color="#c98d5a", linewidth=0.65, alpha=0.85, zorder=3.5)
-        handles.append(Line2D([], [], color="#c98d5a", linewidth=1.2, label="стихийные тропы OSM"))
+        handles.append(Line2D([], [], color="#c98d5a", linewidth=1.2, label=_inf_label()))
     if ctx["pv"] is not None and not ctx["pv"].empty:
         ctx["pv"].plot(ax=ax, color="#5f6368", linewidth=1.35, zorder=3.8)
         handles.append(Line2D([], [], color="#5f6368", linewidth=2.0, label="дороги с твёрдым покрытием"))
@@ -6977,7 +7034,7 @@ def draw_kvartal(data: Data, evidence: gpd.GeoDataFrame | None, kv, oozt_name, o
         it = gpd.clip(data.trails_informal, u)
         if not it.empty:
             it.plot(ax=ax, color="#c98d5a", linewidth=0.8, alpha=0.85, zorder=3.6)
-            handles.append(Line2D([], [], color="#c98d5a", linewidth=1.2, label="стихийные тропы OSM"))
+            handles.append(Line2D([], [], color="#c98d5a", linewidth=1.2, label=_inf_label()))
     if paved is not None and not paved.empty:
         pv = gpd.clip(paved, u)
         if not pv.empty:
@@ -8716,7 +8773,7 @@ def write_qgis_project(out: Path, cfg: Config, data: "Data", gpkg: Path, terr_la
     _CTX_TITLE = {"rivers_ditches": "Реки и канавы", "lakes_ponds": "Озёра и пруды",
                   "roads_paved": "Дороги с твёрдым покрытием", "roads_dirt": "Дороги грунтовые",
                   "contours": "Горизонтали (2,5 м)", "recreation_points": "Рекреация: объекты",
-                  "informal_trails": "Стихийные тропы OSM", "pvn_points": "Лесопатология: все точки ПВН",
+                  "informal_trails": _inf_label()[:1].upper() + _inf_label()[1:], "pvn_points": "Лесопатология: все точки ПВН",
                   "wetlands": "Болота"}
     ctx_by_name = {}
     for c in ctx_layers:
