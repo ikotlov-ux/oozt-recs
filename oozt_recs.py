@@ -4331,6 +4331,222 @@ def oozt_flag(measure: dict, oozt):
     return None
 
 
+# =====================================================================================
+#        ЖУРНАЛ ПРИЧИН: почему мероприятие назначено или не назначено (по каждой ООЗТ)
+# =====================================================================================
+class Diag:
+    """Собирает по каждому мероприятию: статус до расчёта, сообщения правила, воронку отбора
+    по ООЗТ (сколько полигонов прошло каждое условие), отброшенные флагами ООЗТ и итог."""
+
+    def __init__(self, data=None):
+        self.items: list[dict] = []
+        self.cur: dict | None = None
+        self.data = data
+        self._oo_union = None
+
+    def start(self, measure: dict, status: dict | None = None):
+        self.cur = dict(code=str(measure.get("code") or ""), name=measure["name"], measure=measure,
+                        state=(status or {}).get("state"), status=(status or {}).get("text", ""),
+                        rule=(status or {}).get("rule"), lines=[], steps=[], drop={}, error=None)
+        self.items.append(self.cur)
+        return self.cur
+
+    def stop(self):
+        self.cur = None
+
+    def note(self, level: str, msg: str):
+        if self.cur is not None:
+            self.cur["lines"].append((level, msg.strip()))
+
+    def dropped(self, oozt):
+        if self.cur is not None:
+            self.cur["drop"][oozt] = self.cur["drop"].get(oozt, 0) + 1
+
+    def step(self, title: str, g, col: str | None = "OOZT"):
+        """Шаг воронки: число объектов всего и по ООЗТ (если в g есть поле ООЗТ)."""
+        if self.cur is None or g is None:
+            return
+        try:
+            if col and col in g.columns:
+                by = g[col].value_counts().to_dict()
+            else:
+                by = self._by_oozt(g)
+            title = title if len(title) <= 160 else title[:157] + "…"
+            self.cur["steps"].append((title, int(len(g)), {str(k): int(v) for k, v in by.items()}))
+        except Exception:
+            pass
+
+    def _by_oozt(self, g) -> dict:
+        """Число объектов по ООЗТ пространственно (для слоёв без поля ООЗТ: находки видов и т. п.)."""
+        d = self.data
+        if d is None or getattr(d, "oozt", None) is None or "geometry" not in getattr(g, "columns", []):
+            return {}
+        try:
+            if self._oo_union is None:
+                self._oo_union = d.oozt[["OOZT", "geometry"]].dissolve(by="OOZT").reset_index()
+            pts = gpd.GeoDataFrame(geometry=g.geometry.representative_point().values, crs=g.crs)
+            j = gpd.sjoin(pts, self._oo_union, predicate="within", how="left")
+            j = j[~j.index.duplicated()]
+            by = j["OOZT"].value_counts().to_dict()
+            for oo in self._oo_union["OOZT"]:
+                by.setdefault(oo, 0)
+            return by
+        except Exception:
+            return {}
+
+    def step_counts(self, title: str, by: dict):
+        if self.cur is not None:
+            self.cur["steps"].append((title, int(sum(by.values())), {str(k): int(v) for k, v in by.items()}))
+
+
+DIAG = Diag()
+
+
+class _DiagHandler(logging.Handler):
+    def emit(self, record):
+        try:
+            DIAG.note(record.levelname, record.getMessage())
+        except Exception:
+            pass
+
+
+_FLAG_TXT = "выключено для этой ООЗТ (столбец «Вкл_…» таблицы мероприятий)"
+
+
+def _mentions(msg: str, oozt: str, all_oozt) -> bool:
+    """Сообщение относится к ООЗТ (без ложных совпадений «Измайлово» в «Измайлово (Терлецкий)»)."""
+    if not oozt:
+        return False
+    t = msg
+    for o in sorted(all_oozt, key=len, reverse=True):
+        if o != oozt and oozt in o:
+            t = t.replace(o, "")
+    return oozt in t
+
+
+def _diag_reason_zero(it: dict, oozt: str, all_oozt=(), n_other: int = 0) -> str:
+    """Причина, по которой мероприятие не назначено в ООЗТ (из воронки и сообщений правила)."""
+    if it.get("error"):
+        return "ошибка при расчёте: " + it["error"]
+    # первый шаг воронки, на котором в этой ООЗТ не осталось объектов
+    for title, n, by in it["steps"]:
+        if by and by.get(oozt, 0) == 0:
+            return (f"на шаге «{title}» в этой ООЗТ 0 (всего по территории: {n})")
+        if not by and n == 0:
+            return f"на шаге «{title}» не осталось ни одного объекта"
+    msgs = [(lv, m) for lv, m in it["lines"] if not m.startswith("Мероприятие:")]
+    own = [(lv, m) for lv, m in msgs if _mentions(m, oozt, all_oozt)]
+    own_w = [m for lv, m in own if lv in ("WARNING", "ERROR")]
+    if own_w:
+        return own_w[-1]
+    if own:
+        return own[-1][1]
+    if it.get("rule") == "water_ref":
+        return f"в справочнике водоёмов нет отметок {it['code']} для объектов этой ООЗТ"
+    if n_other:
+        return (f"в этой ООЗТ нет участков, удовлетворяющих условиям правила "
+                f"(в других ООЗТ назначено записей: {n_other})")
+    warn = [m for lv, m in msgs if lv in ("WARNING", "ERROR")]
+    if warn:
+        return warn[-1]
+    zero = [m for lv, m in msgs if re.search(r"(— |: |→ )0\b", m)]
+    if zero:
+        return zero[-1]
+    return "ни один участок не прошёл условия правила" + (f" (последнее сообщение: {msgs[-1][1]})" if msgs else "")
+
+
+def diag_table(data, res) -> pd.DataFrame:
+    """Строка на каждое мероприятие × ООЗТ: итог, число участков, площадь, причина, ход расчёта."""
+    oozts = [str(x) for x in pd.unique(data.oozt["OOZT"])] if data is not None and data.oozt is not None else []
+    rows_by = {}
+    for r in res.rows:
+        k = (r["Мероприятие"], str(r["ООЗТ"]))
+        a = rows_by.setdefault(k, [0, 0.0, set()])
+        a[0] += 1
+        a[1] += float(r.get("_work_ha") or 0)
+        a[2].add(str(r.get("Квартал")))
+    out = []
+    for it in DIAG.items:
+        m = it["measure"]
+        steps_txt = "\n".join(
+            f"{t}: {n}" + (" (" + ", ".join(f"{k} — {v}" for k, v in by.items()) + ")" if by else "")
+            for t, n, by in it["steps"])
+        log_txt = "\n".join(f"{'! ' if lv in ('WARNING', 'ERROR') else ''}{msg}" for lv, msg in it["lines"]
+                             if not msg.startswith("Мероприятие:"))
+        for oo in oozts or [""]:
+            n, ha, kvs = rows_by.get((it["name"], oo), (0, 0.0, set()))
+            flag = oozt_flag(m, oo) if oo else None
+            n_other = sum(v[0] for (nm, o2), v in rows_by.items() if nm == it["name"] and o2 != oo)
+            if it["state"] == "off":
+                res_txt, why = "выключено", "выключено в таблице (столбец «Вкл/выкл»)"
+            elif flag is False:
+                res_txt = "выключено для ООЗТ"
+                d = it["drop"].get(oo, 0)
+                why = _FLAG_TXT + (f"; подходящих участков отброшено: {d}" if d else "")
+            elif it["state"] == "na":
+                res_txt, why = "без правила", "правило не задано: " + (it["status"] or "назначается вручную")
+            elif it["state"] == "missing":
+                res_txt, why = "пропущено", it["status"]
+            elif n:
+                res_txt = "назначено"
+                why = f"{n} записей, кварталов: {len(kvs)}, {ha:.2f} га"
+            else:
+                res_txt, why = "не назначено", _diag_reason_zero(it, oo, oozts, n_other)
+            out.append({"Код": it["code"], "Мероприятие": it["name"], "ООЗТ": oo, "Итог": res_txt,
+                        "Записей": n, "Кварталов": len(kvs), "Площадь, га": round(ha, 2), "Причина": why,
+                        "Правило": RULES[it["rule"]]["title"] if it.get("rule") in RULES else "",
+                        "Воронка отбора": steps_txt, "Сообщения расчёта": log_txt})
+    return pd.DataFrame(out)
+
+
+def write_diagnostics(out: Path, data, res):
+    """diagnostics.xlsx + diagnostics.txt + итоговый блок в журнале."""
+    df = diag_table(data, res)
+    if df.empty:
+        return df
+    try:
+        with pd.ExcelWriter(out / "diagnostics.xlsx", engine="openpyxl") as xw:
+            df.to_excel(xw, sheet_name="Причины", index=False)
+            ws = xw.sheets["Причины"]
+            from openpyxl.styles import Alignment, PatternFill, Font
+            widths = {"A": 8, "B": 45, "C": 22, "D": 18, "E": 9, "F": 10, "G": 11, "H": 70, "I": 28,
+                      "J": 60, "K": 90}
+            for c, w in widths.items():
+                ws.column_dimensions[c].width = w
+            fills = {"назначено": "E2F0D9", "не назначено": "FCE4D6", "пропущено": "FFF2CC",
+                     "выключено для ООЗТ": "EDEDED", "выключено": "EDEDED", "без правила": "EDEDED"}
+            for row in ws.iter_rows(min_row=2):
+                for c in row:
+                    c.alignment = Alignment(wrap_text=True, vertical="top")
+                f = fills.get(row[3].value)
+                if f:
+                    row[3].fill = PatternFill("solid", fgColor=f)
+            for c in ws[1]:
+                c.font = Font(bold=True)
+            ws.freeze_panes = "D2"
+            ws.auto_filter.ref = ws.dimensions
+    except Exception as e:
+        log.warning("diagnostics.xlsx не записан: %s", e)
+    lines = ["ПОЧЕМУ МЕРОПРИЯТИЯ НАЗНАЧЕНЫ ИЛИ НЕ НАЗНАЧЕНЫ", "=" * 60]
+    for (code, name), g in df.groupby(["Код", "Мероприятие"], sort=False):
+        lines.append(f"\n{code} {name}".rstrip())
+        st = g.iloc[0]
+        if st["Правило"]:
+            lines.append(f"  правило: {st['Правило']}")
+        for _, r in g.iterrows():
+            lines.append(f"  [{r['ООЗТ'] or '—'}] {r['Итог'].upper()}: {r['Причина']}")
+        if st["Воронка отбора"]:
+            lines.append("  воронка отбора:")
+            lines += ["    " + x for x in str(st["Воронка отбора"]).split("\n")]
+    txt = "\n".join(lines)
+    (out / "diagnostics.txt").write_text(txt + "\n", encoding="utf-8")
+    log.info("\n%s", txt)
+    cnt = df["Итог"].value_counts().to_dict()
+    log.info("Итог по мероприятиям × ООЗТ: %s. Подробно: diagnostics.xlsx / diagnostics.txt",
+             ", ".join(f"{k} — {v}" for k, v in cnt.items()))
+    return df
+
+
 class Results:
     def __init__(self):
         self.rows: list[dict] = []          # длинная таблица (+ геометрия участка работ _geom в WORK_EPSG)
@@ -4341,6 +4557,7 @@ class Results:
         """Запись назначения. season — сезонность записи (вместо столбца таблицы); obj — идентификатор
         объекта (водоём/болото справочника) для подсчёта «Объектов, шт». False — выключено флагом ООЗТ."""
         if oozt_flag(measure, vydel_row["OOZT"]) is False:   # мероприятие выключено для этой ООЗТ
+            DIAG.dropped(vydel_row["OOZT"])
             return False
         wg = work_geom if work_geom is not None else vydel_row.get("geometry")
         if wg is not None and not wg.is_empty:
@@ -4543,7 +4760,13 @@ def _min_share(data) -> float:
 
 def _target(data: Data, p: dict) -> gpd.GeoDataFrame:
     t = p.get("types")
-    return data.vydels_of_type(*t[0]) if t else data.oozt
+    g = data.vydels_of_type(*t[0]) if t else data.oozt
+    if t:
+        if g is None or g.empty:
+            log.warning("  нет полигонов типа «%s» в слое территории", t[1])
+        else:
+            DIAG.step("полигонов типа «%s»" % t[1], g)
+    return g
 
 
 def _qtag(q) -> str:
@@ -4652,6 +4875,7 @@ def rule_trail_density_vydel(data: Data, res: Results, measure: dict, p: dict):
     dens = dens.replace([np.inf], np.nan).fillna(0)
     pos = dens[dens > 0]
     if pos.empty:
+        log.warning("  тропы не пересекают ни одного подходящего полигона — плотность везде 0")
         return
     if abs_thr:                                   # абсолютный порог, м/га (вместо квартиля)
         thr = float(abs_thr)
@@ -4822,6 +5046,15 @@ def select_species(data: Data, p: dict):
         return g if not g.empty else None
     pts = filt(data.sp_points) if _uses(p, "points") else None
     polys = filt(data.sp_polys) if _uses(p, "polygons") else None
+    if _uses(p, "points"):
+        DIAG.step("находок видов в загруженных слоях (точки)", data.sp_points)
+        DIAG.step("из них подходящих мероприятию (точки: %s)" % _sel_txt(p), pts)
+        if pts is None and DIAG.cur is not None:
+            t_ = "из них подходящих мероприятию (точки: %s)" % _sel_txt(p)
+            DIAG.cur["steps"].append((t_ if len(t_) <= 160 else t_[:157] + "…", 0, {}))
+    if _uses(p, "polygons"):
+        DIAG.step("находок видов в загруженных слоях (полигоны)", data.sp_polys)
+        DIAG.step("из них подходящих мероприятию (полигоны)", polys)
     rasters = []
     if _uses(p, "sdm"):
         for r in data.sp_rasters:
@@ -4863,6 +5096,7 @@ def _sdm_monitoring(data: Data, res: Results, measure: dict, p: dict, rasters, l
     thr = p["sdm"]
     sdm = _sdm_patches(data, rasters, thr=thr)
     if sdm is None or sdm.empty:
+        log.info("  SDM: нет участков с пригодностью ≥ %s", thr)
         return
     m2 = dict(measure)
     m2["name"] = measure["name"] + " — мониторинг (SDM ≥ %.2f)" % thr
@@ -5156,10 +5390,12 @@ def rule_wetland(data: Data, res: Results, measure: dict, p: dict):
         log.error("  оверлей с болотами: %s", e)
         return
     if j.empty:
+        log.warning("  болота не пересекают ни одного подходящего полигона")
         return
     j["_ha"] = j.area / 1e4
     j = j[j["_ha"] >= 0.01]          # касания с нулевой площадью не считаются болотом
     if j.empty:
+        log.warning("  болота только касаются полигонов (пересечение < 0,01 га)")
         return
     for uid, grp in j.groupby("uid"):
         r = data.oozt[data.oozt["uid"] == uid].iloc[0]
@@ -5186,6 +5422,7 @@ def rule_water_catalog(data: Data, res: Results, measure: dict, p: dict):
         sel = cat
         log.info("  водоёмы не отфильтрованы: %d из справочника", len(sel))
     if sel.empty:
+        log.warning("  после фильтра по названиям водоёмов не осталось ни одного")
         return
     target = _target(data, p)
     if target is None or target.empty:
@@ -5312,6 +5549,7 @@ def rule_water_ref(data: Data, res: Results, measure: dict, p: dict):
     hp = data.hydro_polys if data.hydro_polys is not None and not data.hydro_polys.empty else None
     wl = wetland_polys(data)
     stats: dict = {}
+    geo_cnt: dict = {str(x): 0 for x in pd.unique(data.oozt["OOZT"])}
     unmatched = data.__dict__.setdefault("_wr_unmatched", [])
     seen: dict = {}
     ev_w, ev_b = [], []
@@ -5392,6 +5630,7 @@ def rule_water_ref(data: Data, res: Results, measure: dict, p: dict):
                      work_geom=wg, obj=f"{o['sheet']}:{o['row']}")
         if ok:
             stt["matched"] += 1
+            geo_cnt[oo_geo] = geo_cnt.get(oo_geo, 0) + 1
             seen[gkey] = o["name"]
             (ev_b if is_bog else ev_w).append(dict(geometry=wg, label=o["name"], oozt=oo_geo))
         else:
@@ -5403,6 +5642,9 @@ def rule_water_ref(data: Data, res: Results, measure: dict, p: dict):
     for oo, v in stats.items():
         log.info("  справочник %s, %s: отмечено %d, привязано %d, не найдено %d, отброшено флагами %d",
                  code, oo, v["marked"], v["matched"], v["unmatched"], v["dropped"])
+    log.info("  назначено по ООЗТ, определённой по геометрии: %s",
+             ", ".join(f"{k} — {v}" for k, v in geo_cnt.items()))
+    DIAG.step_counts("объектов справочника, привязанных к контурам (ООЗТ по геометрии)", geo_cnt)
     _wr_write_unmatched(data)
 
 
@@ -5464,14 +5706,26 @@ def rule_rare_trail_vydel(data: Data, res: Results, measure: dict, p: dict):
         target = target[target["area_ha"] > float(amin)]
     if amax is not None:
         target = target[target["area_ha"] <= float(amax)]
+    DIAG.step("выделов всего", data.oozt)
     if target.empty:
+        log.warning("  нет выделов%s", _vydel_area_txt(p, " площадью "))
         return
+    DIAG.step("выделов" + _vydel_area_txt(p, " площадью "), target)
+    if pts is not None:
+        DIAG.step("находок растений КК (точки)", pts, col=None)
+    if polys is not None:
+        DIAG.step("находок растений КК (полигоны)", polys, col=None)
     tu = _safe_union(trails.geometry.values)
     dens = (target.geometry.intersection(tu).length / target["area_ha"]).replace([np.inf], np.nan).fillna(0)
     sel = target[dens > thr]
     log.info("  выделов%s: %d; плотность стихийных троп > %g м/га — %d", _vydel_area_txt(p, " площадью "),
              len(target), thr, len(sel))
+    for oo, dd in dens.groupby(target["OOZT"]):
+        log.info("    %s: плотность стихийных троп в выделах — медиана %.0f, макс. %.0f м/га; выше порога %g — %d",
+                 oo, float(dd.median()), float(dd.max()), thr, int((dd > thr).sum()))
+    DIAG.step("выделов с плотностью троп > %g м/га" % thr, sel)
     n, ev_t, ev_p = 0, [], []
+    n_with, oo_with = 0, {}
     for (_, r), d in zip(sel.iterrows(), dens[dens > thr]):
         finds = []
         if pts is not None:
@@ -5487,6 +5741,8 @@ def rule_rare_trail_vydel(data: Data, res: Results, measure: dict, p: dict):
             if any(x is not None and not x.empty for x in finds) else None
         if f is None or f.empty:
             continue
+        n_with += 1
+        oo_with[r["OOZT"]] = oo_with.get(r["OOZT"], 0) + 1
         sp = f.groupby("species")["kk_cat"].first()
         season = None
         if p.get("season_flower"):
@@ -5510,6 +5766,9 @@ def rule_rare_trail_vydel(data: Data, res: Results, measure: dict, p: dict):
         if ev_p:
             res.add_evidence(gpd.GeoDataFrame(pd.concat(ev_p, ignore_index=True), crs=WORK_EPSG),
                              measure["name"], "редкие виды — точки", "species")
+    DIAG.step_counts("из них с находкой растения КК", oo_with)
+    if len(sel) and not n_with:
+        log.warning("  ни в одном выделе с плотностью троп > %g м/га нет находок растений КК", thr)
     log.info("  → %d %s", n, _units())
 
 
@@ -8709,13 +8968,27 @@ def run(cfg: Config):
             log.info("         как рассчитывается: %s", describe_rule(m))
             for k in stt.get("layers") or []:
                 log.info("         слой видов: %s", species_layer_label(k))
-    for m in measures:
-        if not m["on"]:
-            continue
-        try:
-            dispatch_rule(m, data, res)
-        except Exception as e:
-            log.exception("Ошибка в мероприятии «%s»: %s", m["name"], e)
+    DIAG.__init__(data)
+    _dh = _DiagHandler(level=logging.INFO)
+    logging.getLogger().addHandler(_dh)
+    try:
+        for m in measures:
+            it = DIAG.start(m, measure_status(m, cfg))
+            if not m["on"]:
+                DIAG.stop()
+                continue
+            try:
+                dispatch_rule(m, data, res)
+            except Exception as e:
+                it["error"] = f"{type(e).__name__}: {e}"
+                log.exception("Ошибка в мероприятии «%s»: %s", m["name"], e)
+            DIAG.stop()
+    finally:
+        logging.getLogger().removeHandler(_dh)
+    try:
+        write_diagnostics(out, data, res)
+    except Exception as e:
+        log.warning("журнал причин не сформирован: %s", e)
 
     table = res.long_table()
     if table.empty:
