@@ -45,6 +45,8 @@ import os
 import re
 import sys
 import tempfile
+import time
+import urllib.parse
 import urllib.request
 import warnings
 from dataclasses import dataclass, field, asdict
@@ -357,6 +359,10 @@ class Config:
     trails: list[str] = field(default_factory=list)
     informal_trails: list = field(default_factory=lambda: ["auto"])   # ["auto"] — скачать из OSM (informal=yes); список путей — свой слой; [] — не использовать
     osm_trail_kinds: list = field(default_factory=lambda: ["informal"])  # что скачивать из OSM: informal — стихийные, unpaved — грунтовые
+    osm_source: str = "auto"         # откуда брать тропы OSM: auto (Overpass → BBBike → Geofabrik) | overpass | bbbike | geofabrik | pbf
+    osm_pbf: str = ""                # свой файл OSM (.osm.pbf / .osm) при osm_source = "pbf"
+    osm_cache_dir: str = ""          # папка для скачанных .pbf (пусто — osm_cache рядом со скриптом)
+    osm_cache_days: int = 30         # скачанный .pbf используется повторно, пока не старше N дней
     roads_paved: list[str] = field(default_factory=list)   # дороги с твёрдым покрытием: «Колокольчик», карты
     roads_dirt: list[str] = field(default_factory=list)   # грунтовые дороги: «Колокольчик», карты
     hydro_lines: list[str] = field(default_factory=list)
@@ -1776,7 +1782,7 @@ class SetupWindow:
         self._inf_files: list[str] = []
         f_osm = ttk.Frame(fi)
         f_osm.grid(row=1, column=0, columnspan=2, sticky="w")
-        ttk.Radiobutton(f_osm, text="скачать из OSM (нужен интернет):", value="auto",
+        ttk.Radiobutton(f_osm, text="из OSM:", value="auto",
                         variable=self.v_inf_mode, command=self._inf_changed).pack(side="left")
         self.v_osm_inf = tk.BooleanVar(value=True)
         self.v_osm_unp = tk.BooleanVar(value=False)
@@ -1784,15 +1790,26 @@ class SetupWindow:
                         command=self._inf_changed).pack(side="left", padx=(8, 0))
         ttk.Checkbutton(f_osm, text="грунтовые", variable=self.v_osm_unp,
                         command=self._inf_changed).pack(side="left", padx=(8, 0))
+        f_src = ttk.Frame(fi)
+        f_src.grid(row=2, column=0, columnspan=2, sticky="w", padx=(22, 0))
+        ttk.Label(f_src, text="источник OSM:").pack(side="left")
+        self.v_osm_src = tk.StringVar(value=OSM_SOURCES["auto"][0])
+        self._osm_src_keys = {v[0]: k for k, v in OSM_SOURCES.items()}
+        cb = ttk.Combobox(f_src, textvariable=self.v_osm_src, state="readonly", width=46,
+                          values=[v[0] for v in OSM_SOURCES.values()])
+        cb.pack(side="left", padx=(6, 0))
+        cb.bind("<<ComboboxSelected>>", lambda e: self._inf_changed())
+        self._osm_pbf = ""
+        ttk.Button(f_src, text="Файл .pbf…", command=self._pick_osm_pbf).pack(side="left", padx=(8, 0))
         f_own = ttk.Frame(fi)
-        f_own.grid(row=2, column=0, columnspan=2, sticky="w")
+        f_own.grid(row=3, column=0, columnspan=2, sticky="w")
         ttk.Radiobutton(f_own, text="свой слой", value="files",
                         variable=self.v_inf_mode, command=self._inf_changed).pack(side="left")
         ttk.Button(f_own, text="Выбрать…", command=self._pick_informal).pack(side="left", padx=(8, 0))
         ttk.Radiobutton(fi, text="не использовать", value="none",
-                        variable=self.v_inf_mode, command=self._inf_changed).grid(row=3, column=0, sticky="w")
+                        variable=self.v_inf_mode, command=self._inf_changed).grid(row=4, column=0, sticky="w")
         self.l_inf = ttk.Label(fi, foreground=self.C_MUTED, font=self.f_small, wraplength=600, justify="left")
-        self.l_inf.grid(row=4, column=0, columnspan=2, sticky="w")
+        self.l_inf.grid(row=5, column=0, columnspan=2, sticky="w")
         self._inf_changed()
         self._species_block(s3)
 
@@ -2128,11 +2145,33 @@ class SetupWindow:
                 parts.append("стихийные (informal=yes)")
             if self.v_osm_unp.get():
                 parts.append(f"грунтовые (highway={OSM_UNPAVED_HIGHWAY} и surface={OSM_UNPAVED_SURFACE})")
-            txt = ("будут скачаны тропы OSM в границах территории: " + "; ".join(parts)) if parts else \
-                "отметьте, какие тропы скачивать: стихийные и/или грунтовые"
+            src = self._osm_src_keys.get(self.v_osm_src.get(), "auto")
+            if src == "pbf":
+                where = ("файл " + Path(self._osm_pbf).name) if self._osm_pbf else \
+                    "файл .pbf не выбран — нажмите «Файл .pbf…»"
+            elif src == "auto":
+                where = "Overpass, при неудаче — выгрузки BBBike (Москва), затем Geofabrik (ЦФО); нужен интернет" + \
+                    (f"; первым — файл {Path(self._osm_pbf).name}" if self._osm_pbf else "")
+            elif src == "overpass":
+                where = "Overpass API, нужен интернет"
+            else:
+                where = OSM_SOURCES[src][0] + " — скачивается один раз в папку osm_cache рядом со скриптом"
+            txt = ("тропы OSM в границах территории: " + "; ".join(parts) + ". Источник: " + where) if parts else \
+                "отметьте, какие тропы брать из OSM: стихийные и/или грунтовые"
         else:
             txt = "стихийные тропы не используются — мероприятия с «Только стихийные тропы» = да не назначаются"
         self.l_inf.configure(text=txt)
+
+    def _pick_osm_pbf(self):
+        from tkinter import filedialog
+        p = filedialog.askopenfilename(parent=self.root, title="Файл OpenStreetMap (.osm.pbf / .osm)",
+                                       filetypes=PBF_TYPES)
+        if p:
+            self._osm_pbf = p
+            if self._osm_src_keys.get(self.v_osm_src.get()) != "auto":
+                self.v_osm_src.set(OSM_SOURCES["pbf"][0])
+            self.v_inf_mode.set("auto")
+            self._inf_changed()
 
     def _pick_informal(self):
         ps = self._ask("vec", True, "Стихийные тропы — линейный слой (можно несколько файлов)")
@@ -2336,6 +2375,8 @@ class SetupWindow:
                              list(self._inf_files) if _im == "files" else [])
         c.osm_trail_kinds = [k for k, v in (("informal", self.v_osm_inf), ("unpaved", self.v_osm_unp))
                              if v.get()] or ["informal"]
+        c.osm_source = self._osm_src_keys.get(self.v_osm_src.get(), "auto")
+        c.osm_pbf = self._osm_pbf or ""
         try:
             c.min_share_pct = max(0.0, float(self.v_minshare.get().replace(",", ".") or 0))
         except ValueError:
@@ -2472,6 +2513,9 @@ class SetupWindow:
         _k = getattr(cfg, "osm_trail_kinds", None) or ["informal"]
         self.v_osm_inf.set("informal" in _k)
         self.v_osm_unp.set("unpaved" in _k)
+        _src = str(getattr(cfg, "osm_source", "auto") or "auto").lower()
+        self.v_osm_src.set(OSM_SOURCES.get(_src, OSM_SOURCES["auto"])[0])
+        self._osm_pbf = str(getattr(cfg, "osm_pbf", "") or "")
         self._inf_changed()
         self.v_minshare.set(f"{float(getattr(cfg, 'min_share_pct', 25.0)):g}")
         for k, v in self.v_formats.items():
@@ -3683,13 +3727,22 @@ def _osm_trail_kind(tags: dict) -> str:
     return "стихийная, грунтовая" if inf and unp else "стихийная" if inf else "грунтовая" if unp else ""
 
 
-def download_informal_trails_osm(bbox_wgs84, out_dir, kinds=("informal",)) -> Path | None:
-    """Тропы OSM через Overpass API → GeoJSON (WGS 84): стихийные (informal=yes) и/или грунтовые.
-    При неудаче (нет интернета, Overpass недоступен) возвращает None — скрипт продолжит без слоя."""
-    kinds = [k for k in (kinds or ["informal"]) if k in OSM_TRAIL_KIND_TITLE] or ["informal"]
+OSM_SOURCES = {     # ключ → (подпись в окне, URL .pbf или None)
+    "auto": ("автоматически: Overpass → BBBike → Geofabrik", None),
+    "overpass": ("Overpass API (запрос по границам территории)", None),
+    "bbbike": ("BBBike: Москва (.pbf, ~85 МБ)", "https://download.bbbike.org/osm/bbbike/Moscow/Moscow.osm.pbf"),
+    "geofabrik": ("Geofabrik: ЦФО (.pbf, ~850 МБ)",
+                  "https://download.geofabrik.de/russia/central-fed-district-latest.osm.pbf"),
+    "pbf": ("свой файл OSM (.osm.pbf / .osm)", None),
+}
+BBBIKE_MOSCOW_EXTENT = (37.32, 55.57, 37.88, 55.92)   # охват выгрузки BBBike «Moscow» (W, S, E, N)
+PBF_TYPES = [("OpenStreetMap", "*.osm.pbf *.pbf *.osm"), ("Все файлы", "*.*")]
+
+
+def _osm_trails_overpass(bbox_wgs84, kinds):
+    """Тропы через Overpass API (по очереди зеркала OVERPASS_ENDPOINTS) → GeoDataFrame или None."""
     q = osm_trails_query(bbox_wgs84, kinds)
-    log.info("Тропы OSM (%s): запрос Overpass: %s",
-             ", ".join(OSM_TRAIL_KIND_TITLE[k] for k in kinds), q)
+    log.info("Тропы OSM: запрос Overpass: %s", q)
     data = None
     for url in OVERPASS_ENDPOINTS:
         try:
@@ -3701,8 +3754,7 @@ def download_informal_trails_osm(bbox_wgs84, out_dir, kinds=("informal",)) -> Pa
         except Exception as e:
             log.warning("Overpass %s: %s", url, e)
     if not data:
-        log.warning("Стихийные тропы OSM не скачаны (Overpass API недоступен) — слой пропущен, "
-                    "правила «только стихийные тропы» используют всю дорожно-тропиночную сеть")
+        log.warning("Тропы OSM: Overpass API недоступен")
         return None
     lines, ids, kd, hw, sf = [], [], [], [], []
     for el in data.get("elements", []):
@@ -3716,16 +3768,155 @@ def download_informal_trails_osm(bbox_wgs84, out_dir, kinds=("informal",)) -> Pa
             kd.append(_osm_trail_kind(tg))
             hw.append(tg.get("highway", ""))
             sf.append(tg.get("surface", ""))
-    if not lines:
-        log.warning("В OSM нет троп (%s) в границах территории", ", ".join(OSM_TRAIL_KIND_TITLE[k] for k in kinds))
+    return gpd.GeoDataFrame({"osm_id": ids, "kind": kd, "highway": hw, "surface": sf},
+                            geometry=lines, crs=4326)
+
+
+_HSTORE_RE = re.compile(r'"((?:[^"\\]|\\.)*)"=>"((?:[^"\\]|\\.)*)"')
+
+
+def _parse_other_tags(v) -> dict:
+    """Поле other_tags драйвера GDAL OSM: "k"=>"v","k2"=>"v2" → dict."""
+    if not isinstance(v, str) or not v:
+        return {}
+    return {k.replace('\\"', '"'): x.replace('\\"', '"') for k, x in _HSTORE_RE.findall(v)}
+
+
+def _osm_trails_pbf(path, bbox_wgs84, kinds):
+    """Тропы из файла OSM (.osm.pbf / .osm) через драйвер GDAL OSM (слой lines) → GeoDataFrame или None."""
+    import pyogrio
+    p = Path(path)
+    if not p.is_file():
+        log.warning("Тропы OSM: файл не найден — %s", p)
         return None
-    g = gpd.GeoDataFrame({"osm_id": ids, "kind": kd, "highway": hw, "surface": sf}, geometry=lines, crs=4326)
+    w, s_, e, n = [float(x) for x in bbox_wgs84]
+    log.info("Тропы OSM: чтение %s (%.0f МБ), охват %.4f, %.4f — %.4f, %.4f",
+             p.name, p.stat().st_size / 1e6, w, s_, e, n)
+    df = pyogrio.read_dataframe(str(p), layer="lines", bbox=(w, s_, e, n))
+    if df is None or df.empty:
+        return gpd.GeoDataFrame({"osm_id": [], "kind": [], "highway": [], "surface": []},
+                                geometry=[], crs=4326)
+    ot = df["other_tags"] if "other_tags" in df.columns else pd.Series([None] * len(df), index=df.index)
+    rows = []
+    for idx, v in ot.items():
+        tg = _parse_other_tags(v)
+        for c in ("highway", "surface", "informal"):
+            if c in df.columns and isinstance(df.at[idx, c], str) and df.at[idx, c]:
+                tg[c] = df.at[idx, c]
+        k = _osm_trail_kind(tg)
+        ok = ("informal" in kinds and "стихийная" in k) or ("unpaved" in kinds and "грунтовая" in k)
+        if ok:
+            rows.append((idx, k, tg.get("highway", ""), tg.get("surface", "")))
+    sel = df.loc[[r[0] for r in rows]]
+    g = gpd.GeoDataFrame({"osm_id": sel["osm_id"].values if "osm_id" in sel.columns else range(len(sel)),
+                          "kind": [r[1] for r in rows], "highway": [r[2] for r in rows],
+                          "surface": [r[3] for r in rows]},
+                         geometry=sel.geometry.values, crs=df.crs or 4326)
+    return g.to_crs(4326)
+
+
+def _osm_cache_dir(cache_dir="") -> Path:
+    d = Path(cache_dir) if str(cache_dir or "").strip() else Path(__file__).resolve().parent / "osm_cache"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def _download_pbf(key, cache_dir="", max_age_days=30) -> Path | None:
+    """Скачивает выгрузку OSM (.pbf) в кэш; файл моложе max_age_days используется повторно."""
+    url = OSM_SOURCES[key][1]
+    p = _osm_cache_dir(cache_dir) / Path(urllib.parse.urlparse(url).path).name
+    if p.is_file() and p.stat().st_size > 0:
+        age = (time.time() - p.stat().st_mtime) / 86400
+        if age <= float(max_age_days or 0):
+            log.info("Тропы OSM: используется скачанный ранее %s (%.0f дн., %.0f МБ)", p, age, p.stat().st_size / 1e6)
+            return p
+    log.info("Тропы OSM: скачивание %s → %s", url, p)
+    tmp = p.with_suffix(p.suffix + ".part")
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "oozt-recs/1.0 (protected area recommendations)"})
+        with urllib.request.urlopen(req, timeout=60) as r, open(tmp, "wb") as f:
+            total = int(r.headers.get("Content-Length") or 0)
+            got, step = 0, 0
+            while True:
+                b = r.read(1 << 20)
+                if not b:
+                    break
+                f.write(b)
+                got += len(b)
+                if total and got * 10 // total > step:
+                    step = got * 10 // total
+                    log.info("  скачано %d%% (%.0f из %.0f МБ)", step * 10, got / 1e6, total / 1e6)
+        if total and got < total:
+            raise IOError(f"получено {got} из {total} байт")
+        tmp.replace(p)
+        return p
+    except Exception as e:
+        log.warning("Тропы OSM: %s не скачан (%s)", url, e)
+        try:
+            tmp.unlink()
+        except Exception:
+            pass
+        return p if p.is_file() else None      # старый файл из кэша лучше, чем ничего
+
+
+def _bbox_inside(bb, ext) -> bool:
+    return bb[0] >= ext[0] and bb[1] >= ext[1] and bb[2] <= ext[2] and bb[3] <= ext[3]
+
+
+def download_informal_trails_osm(bbox_wgs84, out_dir, kinds=("informal",), source="auto", pbf="",
+                                 cache_dir="", cache_days=30) -> Path | None:
+    """Тропы OSM → GeoJSON (WGS 84): стихийные (informal=yes) и/или грунтовые.
+    Источник: Overpass API, выгрузка BBBike (Москва), Geofabrik (ЦФО) или свой файл .osm.pbf;
+    auto — по очереди Overpass → BBBike → Geofabrik. При неудаче возвращает None — скрипт продолжит без слоя."""
+    kinds = [k for k in (kinds or ["informal"]) if k in OSM_TRAIL_KIND_TITLE] or ["informal"]
+    source = str(source or "auto").strip().lower()
+    if source not in OSM_SOURCES:
+        log.warning("Тропы OSM: неизвестный источник «%s» — используется auto", source)
+        source = "auto"
+    bb = [float(x) for x in bbox_wgs84]
+    order = {"auto": ["overpass", "bbbike", "geofabrik"]}.get(source, [source])
+    if source == "auto" and str(pbf or "").strip():
+        order = ["pbf"] + order                  # указан свой файл — он первым
+    log.info("Тропы OSM (%s): источник — %s", ", ".join(OSM_TRAIL_KIND_TITLE[k] for k in kinds),
+             " → ".join(OSM_SOURCES[k][0] for k in order))
+    g, used = None, ""
+    for src in order:
+        try:
+            if src == "overpass":
+                g = _osm_trails_overpass(bb, kinds)
+            elif src == "pbf":
+                if not str(pbf or "").strip():
+                    log.warning("Тропы OSM: файл .osm.pbf не выбран")
+                    continue
+                g = _osm_trails_pbf(pbf, bb, kinds)
+            else:
+                if src == "bbbike" and not _bbox_inside(bb, BBBIKE_MOSCOW_EXTENT):
+                    log.warning("Тропы OSM: территория выходит за охват выгрузки BBBike «Moscow» %s — пропуск",
+                                BBBIKE_MOSCOW_EXTENT)
+                    continue
+                fp = _download_pbf(src, cache_dir, cache_days)
+                g = _osm_trails_pbf(fp, bb, kinds) if fp else None
+        except Exception as e:
+            log.warning("Тропы OSM: источник «%s» — ошибка (%s)", OSM_SOURCES[src][0], e)
+            g = None
+        if g is not None:
+            used = src
+            break
+    if g is None:
+        log.warning("Тропы OSM не получены ни из одного источника — слой пропущен, "
+                    "правила «только стихийные тропы» используют всю дорожно-тропиночную сеть")
+        return None
+    if g.empty:
+        log.warning("В OSM нет троп (%s) в границах территории (источник — %s)",
+                    ", ".join(OSM_TRAIL_KIND_TITLE[k] for k in kinds), OSM_SOURCES[used][0])
+        return None
+    g["source"] = OSM_SOURCES[used][0]
     out = Path(out_dir) if str(out_dir or "").strip() else Path.cwd()
     out.mkdir(parents=True, exist_ok=True)
     p = out / "informal_trails_osm.geojson"
     g.to_file(p, driver="GeoJSON", encoding="utf-8")
-    log.info("Тропы OSM: %d сегментов (%s) → %s", len(g),
-             ", ".join(f"{k} — {v}" for k, v in g["kind"].value_counts().items()), p.name)
+    log.info("Тропы OSM: %d сегментов (%s), источник — %s → %s", len(g),
+             ", ".join(f"{k} — {v}" for k, v in g["kind"].value_counts().items()), OSM_SOURCES[used][0], p.name)
     return p
 
 
@@ -4185,7 +4376,10 @@ class Data:
         if auto:
             try:
                 p = download_informal_trails_osm(self.bbox_wgs84, cfg.out_dir,
-                                                 getattr(cfg, "osm_trail_kinds", None) or ["informal"])
+                                                 getattr(cfg, "osm_trail_kinds", None) or ["informal"],
+                                                 getattr(cfg, "osm_source", "auto"), getattr(cfg, "osm_pbf", ""),
+                                                 getattr(cfg, "osm_cache_dir", ""),
+                                                 getattr(cfg, "osm_cache_days", 30))
                 if p is not None:
                     files.append(str(p))
             except Exception as e:

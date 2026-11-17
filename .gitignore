@@ -62,3 +62,8 @@ sync_oozt_from_github.cmd
 # Черновые ноутбуки
 Untitled*.ipynb
 measures/*_до_правил.xlsx
+
+# Кэш выгрузок OSM
+osm_cache/
+*.osm.pbf
+*.part
