@@ -656,10 +656,10 @@ RULES = {
     "rare_trail_vydel": dict(
         title="виды КК: стихийные тропы в выделе", data=["species"], opt=["trails", "flowering"],
         params=dict(category=None, groups=None, taxon=None, sources=None, kk_categories=(1, 2, 3),
-                    abs_m_ha=150.0, informal_only=True, vydel_min_ha=None, vydel_max_ha=None,
+                    abs_m_ha=100.0, informal_only=True, vydel_min_ha=None, vydel_max_ha=None,
                     season_flower=False),
         help="Выдел любого типа назначается, если плотность стихийных троп в нём (длина троп OSM informal=yes "
-             "внутри выдела / площадь, м/га) больше порога (150 м/га) и в выделе есть находка вида Красной "
+             "внутри выдела / площадь, м/га) больше порога (100 м/га) и в выделе есть находка вида Красной "
              "книги Москвы заданных категорий (1–3; с учётом синонимов). Ограничение по площади выдела: «Мин. "
              "площадь выдела» — больше, «Макс. площадь выдела» — не больше. «Сроки по цветению» = да — "
              "сезонность записи берётся из справочника цветения (объединение месяцев видов выдела). Участок "
@@ -5457,7 +5457,7 @@ def rule_rare_trail_vydel(data: Data, res: Results, measure: dict, p: dict):
         log.warning("  %s: нет находок видов КК Москвы категорий %s", measure["name"],
                     ", ".join(str(c) for c in p.get("kk_categories") or []))
         return
-    thr = float(p.get("abs_m_ha") or 150.0)
+    thr = float(p.get("abs_m_ha") or 100.0)
     target = data.oozt
     amin, amax = p.get("vydel_min_ha"), p.get("vydel_max_ha")
     if amin is not None:
