@@ -139,6 +139,42 @@ from matplotlib.patches import Patch
 from matplotlib.lines import Line2D
 
 log = logging.getLogger("oozt")
+
+
+class _Progress:
+    """Ход расчёта для окна прогресса: этап (диапазон %), доля внутри этапа, подпись.
+    Без окна (запуск с --config) ничего не делает."""
+
+    def __init__(self):
+        self.q = None                     # queue.Queue окна прогресса или None
+        self.lo, self.hi, self.v = 0.0, 100.0, 0.0
+        self.title = ""
+
+    def _emit(self, *item):
+        if self.q is not None:
+            self.q.put(item)
+
+    def phase(self, title, lo, hi):
+        self.lo, self.hi = float(lo), float(hi)
+        self.v = max(self.v, self.lo)
+        self.title = title
+        self._emit("phase", title, self.v)
+
+    def frac(self, f, title=None):
+        f = min(1.0, max(0.0, float(f)))
+        self.v = max(self.v, self.lo + (self.hi - self.lo) * f)
+        if title:
+            self.title = title
+        self._emit("phase", self.title, self.v)
+
+    def tick(self):
+        """Сообщение журнала внутри этапа: полоска чуть продвигается, не выходя за этап."""
+        if self.q is not None and self.hi > self.v:
+            self.v += (self.hi - self.v) * 0.02
+            self._emit("value", self.v)
+
+
+PROG = _Progress()
 logging.getLogger("pyogrio").setLevel(logging.WARNING)
 logging.getLogger("rasterio").setLevel(logging.WARNING)
 
@@ -8172,7 +8208,9 @@ def _report_blocks(data: Data, table: pd.DataFrame, evidence, rep: Path, kv_all:
     all_oos = list(dict.fromkeys(kv_all["OOZT"].astype(str))) if not kv_all.empty else (
         list(dict.fromkeys(data.oozt["OOZT"].astype(str))) if data.oozt is not None and not data.oozt.empty else []
     )
-    for oo in all_oos:
+    PROG.phase("Обзорные и частные схемы", 62, 76)
+    for oo_i, oo in enumerate(all_oos):
+        PROG.frac(oo_i / max(1, len(all_oos)), "Обзорная схема: %s (%d из %d)" % (oo, oo_i + 1, len(all_oos)))
         ctx_oo = _oozt_map_ctx(data, oo) if draw else None
         png_o = rep / ("fig_oozt_" + re.sub(r"\W+", "_", str(oo)) + ".png")
         if draw:
@@ -8202,6 +8240,8 @@ def _report_blocks(data: Data, table: pd.DataFrame, evidence, rep: Path, kv_all:
                 wgs_m = work_by_om.get((str(oo), str(m_name)), [])
                 season_m = merge_seasons(sub_m["Сезонность"]) if "Сезонность" in sub_m.columns else ""
                 if draw:
+                    PROG.frac((oo_i + m_idx / (len(ord_ms) + 1)) / max(1, len(all_oos)),
+                              "Частная схема %d из %d: %s — %s" % (m_idx, len(ord_ms), oo, m_name))
                     log.info("  Частная схема [%d/%d]: %s — %s", m_idx, len(ord_ms), oo, m_name)
                     try:
                         draw_oozt(data, evidence, oo, png_m, basemap=basemap, ctx=ctx_oo,
@@ -8256,8 +8296,11 @@ def _report_blocks(data: Data, table: pd.DataFrame, evidence, rep: Path, kv_all:
         cols = [L["unit"], L["unit_name"], "Мероприятия", "Основание"]
         w0 = 1.8 if cfg.unit_mode == "eco" else 1.3
         widths = [w0, 4.6, 7.4, TEXT_W_CM - w0 - 4.6 - 7.4]
-    for _, kr in kv_all.iterrows():
+    PROG.phase("Схемы кварталов", 76, 95)
+    for kv_i, (_, kr) in enumerate(kv_all.iterrows()):
         oozt, kv = kr["OOZT"], kr["KV"]
+        PROG.frac(kv_i / max(1, len(kv_all)), "Схема %d из %d: %s, %s %s" % (kv_i + 1, len(kv_all), oozt,
+                                                                    L["group"].lower(), kv))
         png = rep / _fig_name(oozt, kv)
         if draw:
             log.info("Схема: %s, %s %s", oozt, L["group"].lower(), kv)
@@ -8797,6 +8840,7 @@ def _write_report_files(blocks: list, rep: Path, title: str, formats) -> dict:
     """Записывает report.md и выбранные форматы; возвращает {формат: путь}."""
     formats = [f for f in (formats or []) if f in REPORT_FORMATS]
     made = {}
+    PROG.phase("Запись отчёта (MD" + "".join(", " + f.upper() for f in formats) + ")", 95, 99.5)
     _write_md(blocks, rep / "report.md")
     made["md"] = rep / "report.md"
     if not formats:
@@ -9258,7 +9302,9 @@ def run(cfg: Config):
     out.mkdir(parents=True, exist_ok=True)
     _setup_logging(out)
     _MIN_SHARE[0] = float(getattr(cfg, "min_share_pct", 0) or 0)
+    PROG.phase("Чтение таблицы мероприятий", 0, 2)
     measures = read_measures(cfg.measures_xlsx)
+    PROG.phase("Загрузка слоёв", 2, 15)
     # слой стихийных троп скачивается, только если он нужен включённому мероприятию
     cfg._need_informal = any(
         m.get("on") and measure_spec(m).get("p", {}).get("informal_only") for m in measures)
@@ -9281,12 +9327,17 @@ def run(cfg: Config):
     DIAG.__init__(data)
     _dh = _DiagHandler(level=logging.INFO)
     logging.getLogger().addHandler(_dh)
+    PROG.phase("Расчёт мероприятий", 15, 45)
+    n_on, i_on = sum(1 for m in measures if m.get("on")), 0
     try:
         for m in measures:
             it = DIAG.start(m, measure_status(m, cfg))
             if not m["on"]:
                 DIAG.stop()
                 continue
+            i_on += 1
+            PROG.frac((i_on - 1) / max(1, n_on), "Мероприятие %d из %d: %s%s" % (
+                i_on, n_on, (m.get("code") + " ") if m.get("code") else "", m["name"]))
             try:
                 dispatch_rule(m, data, res)
             except Exception as e:
@@ -9295,6 +9346,7 @@ def run(cfg: Config):
             DIAG.stop()
     finally:
         logging.getLogger().removeHandler(_dh)
+    PROG.phase("Журнал причин и таблицы мероприятий", 45, 52)
     try:
         write_diagnostics(out, data, res)
     except Exception as e:
@@ -9407,6 +9459,7 @@ def run(cfg: Config):
 
     # Сводные таблицы по каждому ООЗТ: общая площадь ООЗТ, мероприятия в штуках, гектарах и %
     # от общей площади — в отдельную книгу oozt_summary.xlsx, в листы measures_long.xlsx и в CSV.
+    PROG.phase("Сводки по ООЗТ", 52, 56)
     measures_poly = res.measures_gdf(table, data.union)
     try:
         sum_book = out / "oozt_summary.xlsx"
@@ -9435,6 +9488,7 @@ def run(cfg: Config):
     except Exception as e:
         log.warning("Сводка по ООЗТ не записана: %s", e)
 
+    PROG.phase("GeoPackage и проект QGIS", 56, 62)
     ev = res.evidence_gdf()
     try:
         gpkg = out / "evidence.gpkg"
@@ -9638,6 +9692,190 @@ def run(cfg: Config):
     return table, rep
 
 
+class _ProgressLogHandler(logging.Handler):
+    """Сообщения журнала → очередь окна прогресса."""
+
+    def __init__(self, q):
+        super().__init__(level=logging.INFO)
+        self.q = q
+
+    def emit(self, record):
+        try:
+            self.q.put(("log", record.levelno, record.getMessage()))
+            PROG.tick()
+        except Exception:
+            pass
+
+
+def run_with_progress(fn, cfg: Config):
+    """Запускает fn() (расчёт) в фоновом потоке и показывает окно прогресса: этап, текущее
+    мероприятие или схема, последнее сообщение журнала, полоска в %, время, журнал.
+    Если окно создать нельзя (нет tkinter / экрана) — обычный запуск без окна."""
+    try:
+        import tkinter as tk
+        from tkinter import ttk, messagebox
+        root = tk.Tk()
+    except Exception:
+        return fn()
+    import queue, threading
+    q = queue.Queue()
+    PROG.__init__()
+    PROG.q = q
+    h = _ProgressLogHandler(q)
+    logging.getLogger().addHandler(h)
+    st = {"err": None, "done": False, "warn": 0, "t0": time.time()}
+
+    def work():
+        try:
+            fn()
+        except SystemExit as e:
+            if e.code:
+                st["err"] = f"выход с кодом {e.code}"
+        except BaseException as e:
+            st["err"] = f"{type(e).__name__}: {e}"
+            log.exception("Ошибка выполнения")
+        finally:
+            q.put(("done",))
+
+    root.title("Расчёт мероприятий ООЗТ")
+    root.geometry("860x560")
+    root.minsize(600, 380)
+    fr = ttk.Frame(root, padding=12)
+    fr.pack(fill="both", expand=True)
+    v_phase = tk.StringVar(value="Подготовка…")
+    v_step = tk.StringVar(value="")
+    v_msg = tk.StringVar(value="")
+    v_pct = tk.StringVar(value="0 %")
+    v_time = tk.StringVar(value="")
+    import tkinter.font as tkfont
+    f_head = tkfont.nametofont("TkDefaultFont").copy()
+    f_head.configure(size=max(11, int(f_head.cget("size") or 10) + 3), weight="bold")
+    ttk.Label(fr, textvariable=v_phase, font=f_head).pack(anchor="w")
+    ttk.Label(fr, textvariable=v_step, wraplength=820, justify="left").pack(anchor="w", pady=(4, 0))
+    ttk.Label(fr, textvariable=v_msg, foreground="#5F6368", wraplength=820, justify="left").pack(anchor="w",
+                                                                                                pady=(2, 6))
+    fb = ttk.Frame(fr)
+    fb.pack(fill="x")
+    pb = ttk.Progressbar(fb, orient="horizontal", mode="determinate", maximum=100)
+    pb.pack(side="left", fill="x", expand=True)
+    ttk.Label(fb, textvariable=v_pct, width=7, anchor="e").pack(side="left", padx=(8, 0))
+    ttk.Label(fr, textvariable=v_time, foreground="#5F6368").pack(anchor="w", pady=(4, 6))
+    ft = ttk.Frame(fr)
+    ft.pack(fill="both", expand=True)
+    txt = tk.Text(ft, height=14, wrap="word", font=("TkFixedFont", 9), state="disabled")
+    sb = ttk.Scrollbar(ft, command=txt.yview)
+    txt.configure(yscrollcommand=sb.set)
+    sb.pack(side="right", fill="y")
+    txt.pack(side="left", fill="both", expand=True)
+    txt.tag_configure("warn", foreground="#B35C00")
+    txt.tag_configure("err", foreground="#C62828")
+    txt.tag_configure("head", font=("TkFixedFont", 9, "bold"))
+    fbt = ttk.Frame(fr)
+    fbt.pack(fill="x", pady=(8, 0))
+    out_dir = Path(cfg.out_dir) if str(cfg.out_dir or "").strip() else Path.cwd()
+
+    def open_dir():
+        try:
+            if sys.platform.startswith("win"):
+                os.startfile(str(out_dir))            # noqa — только Windows
+            else:
+                import subprocess
+                subprocess.Popen(["open" if sys.platform == "darwin" else "xdg-open", str(out_dir)])
+        except Exception as e:
+            messagebox.showwarning("Папка результатов", str(e), parent=root)
+
+    def close():
+        if not st["done"]:
+            if not messagebox.askyesno("Прервать расчёт?",
+                                       "Расчёт ещё идёт. Прервать его и закрыть окно?\n"
+                                       "Результаты будут неполными.", parent=root):
+                return
+            logging.shutdown()
+            os._exit(1)
+        root.destroy()
+
+    b_open = ttk.Button(fbt, text="Открыть папку результатов", command=open_dir, state="disabled")
+    b_open.pack(side="left")
+    b_close = ttk.Button(fbt, text="Прервать", command=close)
+    b_close.pack(side="right")
+    root.protocol("WM_DELETE_WINDOW", close)
+
+    def add_line(text, tag=None):
+        txt.configure(state="normal")
+        txt.insert("end", text + "\n", tag or ())
+        n = int(txt.index("end-1c").split(".")[0])
+        if n > 3000:
+            txt.delete("1.0", f"{n - 3000}.0")
+        txt.see("end")
+        txt.configure(state="disabled")
+
+    def fmt_t(sec):
+        sec = int(sec)
+        return f"{sec // 3600}:{sec // 60 % 60:02d}:{sec % 60:02d}" if sec >= 3600 else f"{sec // 60}:{sec % 60:02d}"
+
+    last_phase = [""]
+
+    def poll():
+        try:
+            while True:
+                it = q.get_nowait()
+                if it[0] == "phase":
+                    title, v = it[1], it[2]
+                    m = re.match(r"^(Мероприятие|Обзорная схема|Частная схема|Схема)\b", title)
+                    if m:
+                        v_step.set(title)
+                    else:
+                        v_phase.set(title)
+                        v_step.set("")
+                        if title != last_phase[0]:
+                            add_line("— " + title + " —", "head")
+                            last_phase[0] = title
+                    pb["value"] = v
+                    v_pct.set(f"{v:.0f} %")
+                elif it[0] == "value":
+                    pb["value"] = it[1]
+                    v_pct.set(f"{it[1]:.0f} %")
+                elif it[0] == "log":
+                    lvl, msg = it[1], str(it[2])
+                    first = msg.splitlines()[0] if msg else ""
+                    if lvl >= logging.WARNING:
+                        st["warn"] += 1
+                    add_line(first if lvl < logging.WARNING else ("! " + first),
+                             "err" if lvl >= logging.ERROR else "warn" if lvl >= logging.WARNING else None)
+                    v_msg.set(first[:300])
+                elif it[0] == "done":
+                    st["done"] = True
+        except queue.Empty:
+            pass
+        el = time.time() - st["t0"]
+        v = float(pb["value"] or 0)
+        left = f"; осталось примерно {fmt_t(el * (100 - v) / v)}" if 3 < v < 100 and not st["done"] else ""
+        v_time.set(f"прошло {fmt_t(el)}{left}; предупреждений: {st['warn']}")
+        if st["done"] and b_close["text"] == "Прервать":
+            logging.getLogger().removeHandler(h)
+            PROG.q = None
+            b_close.configure(text="Закрыть")
+            b_open.configure(state="normal")
+            if st["err"]:
+                v_phase.set("Ошибка — расчёт не завершён")
+                v_step.set(st["err"])
+                add_line("Ошибка: " + st["err"], "err")
+                root.bell()
+            else:
+                pb["value"] = 100
+                v_pct.set("100 %")
+                v_phase.set("Готово")
+                v_step.set(f"Результаты: {out_dir}")
+                add_line(f"Готово за {fmt_t(el)}", "head")
+        root.after(150, poll)
+
+    threading.Thread(target=work, daemon=True).start()
+    root.after(100, poll)
+    root.mainloop()
+    if st["err"]:
+        raise RuntimeError(st["err"])
+
+
 def _running_under_ipython() -> bool:
     """Ячейка Jupyter (код вставлен в ноутбук): get_ipython есть, а sys.argv —
     аргументы ядра (ipykernel_launcher). При %run sys.argv — путь к скрипту:
@@ -9656,7 +9894,8 @@ def _clean_argv() -> list[str]:
     if not _running_under_ipython():
         return argv
     value_flags = {"--config", "--kv", "--formats", "--update-table"}
-    bool_flags = {"--gui", "--no-basemap", "--no-split", "--save-config-only", "--report-only"}
+    bool_flags = {"--gui", "--no-basemap", "--no-split", "--save-config-only", "--report-only",
+                  "--progress", "--no-progress"}
     out, i = [], 0
     while i < len(argv):
         a = argv[i]
@@ -9690,6 +9929,9 @@ def _build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--save-config-only", action="store_true", help="только собрать конфиг диалогами и сохранить")
     ap.add_argument("--update-table", metavar="XLSX",
                     help="записать в таблицу мероприятий столбцы правил, справку и описания расчёта и выйти")
+    ap.add_argument("--progress", action="store_true",
+                    help="показывать окно прогресса и при запуске с --config")
+    ap.add_argument("--no-progress", action="store_true", help="не показывать окно прогресса")
     ap.add_argument("--report-only", action="store_true",
                     help="не пересчитывать: построить отчёт по measures_long.csv и evidence.gpkg из out_dir")
     return ap
@@ -9725,10 +9967,12 @@ def _run_with_args(args, ap):
         cfg.save(Path(cfg.out_dir) / "config.json")
         print("Конфигурация сохранена:", Path(cfg.out_dir) / "config.json")
         return
-    if args.report_only:
-        report_only(cfg)
-        return
-    run(cfg)
+    fn = (lambda: report_only(cfg)) if args.report_only else (lambda: run(cfg))
+    gui_used = args.gui or not args.config
+    if (gui_used or getattr(args, "progress", False)) and not getattr(args, "no_progress", False):
+        run_with_progress(fn, cfg)
+    else:
+        fn()
 
 
 def main():
