@@ -356,6 +356,7 @@ class Config:
     dem_path: str | None = None
     trails: list[str] = field(default_factory=list)
     informal_trails: list = field(default_factory=lambda: ["auto"])   # ["auto"] — скачать из OSM (informal=yes); список путей — свой слой; [] — не использовать
+    osm_trail_kinds: list = field(default_factory=lambda: ["informal"])  # что скачивать из OSM: informal — стихийные, unpaved — грунтовые
     roads_paved: list[str] = field(default_factory=list)   # дороги с твёрдым покрытием: «Колокольчик», карты
     roads_dirt: list[str] = field(default_factory=list)   # грунтовые дороги: «Колокольчик», карты
     hydro_lines: list[str] = field(default_factory=list)
@@ -1773,8 +1774,16 @@ class SetupWindow:
                   wraplength=600, justify="left").grid(row=0, column=0, columnspan=2, sticky="w")
         self.v_inf_mode = tk.StringVar(value="auto")
         self._inf_files: list[str] = []
-        ttk.Radiobutton(fi, text="скачать из OSM (informal=yes; нужен интернет)", value="auto",
-                        variable=self.v_inf_mode, command=self._inf_changed).grid(row=1, column=0, sticky="w")
+        f_osm = ttk.Frame(fi)
+        f_osm.grid(row=1, column=0, columnspan=2, sticky="w")
+        ttk.Radiobutton(f_osm, text="скачать из OSM (нужен интернет):", value="auto",
+                        variable=self.v_inf_mode, command=self._inf_changed).pack(side="left")
+        self.v_osm_inf = tk.BooleanVar(value=True)
+        self.v_osm_unp = tk.BooleanVar(value=False)
+        ttk.Checkbutton(f_osm, text="стихийные", variable=self.v_osm_inf,
+                        command=self._inf_changed).pack(side="left", padx=(8, 0))
+        ttk.Checkbutton(f_osm, text="грунтовые", variable=self.v_osm_unp,
+                        command=self._inf_changed).pack(side="left", padx=(8, 0))
         f_own = ttk.Frame(fi)
         f_own.grid(row=2, column=0, columnspan=2, sticky="w")
         ttk.Radiobutton(f_own, text="свой слой", value="files",
@@ -2114,7 +2123,13 @@ class SetupWindow:
         elif m == "files":
             txt = "свой слой: " + "; ".join(Path(x).name for x in self._inf_files)
         elif m == "auto":
-            txt = "будут скачаны линии OSM с тегом informal=yes в границах территории"
+            parts = []
+            if self.v_osm_inf.get():
+                parts.append("стихийные (informal=yes)")
+            if self.v_osm_unp.get():
+                parts.append(f"грунтовые (highway={OSM_UNPAVED_HIGHWAY} и surface={OSM_UNPAVED_SURFACE})")
+            txt = ("будут скачаны тропы OSM в границах территории: " + "; ".join(parts)) if parts else \
+                "отметьте, какие тропы скачивать: стихийные и/или грунтовые"
         else:
             txt = "стихийные тропы не используются — мероприятия с «Только стихийные тропы» = да не назначаются"
         self.l_inf.configure(text=txt)
@@ -2319,6 +2334,8 @@ class SetupWindow:
         _im = self.v_inf_mode.get()
         c.informal_trails = (["auto"] if _im == "auto" else
                              list(self._inf_files) if _im == "files" else [])
+        c.osm_trail_kinds = [k for k, v in (("informal", self.v_osm_inf), ("unpaved", self.v_osm_unp))
+                             if v.get()] or ["informal"]
         try:
             c.min_share_pct = max(0.0, float(self.v_minshare.get().replace(",", ".") or 0))
         except ValueError:
@@ -2452,6 +2469,9 @@ class SetupWindow:
         _inf = [str(x).strip() for x in (cfg.informal_trails or []) if str(x).strip()]
         self._inf_files = [x for x in _inf if x.lower() not in ("auto", "авто", "osm")]
         self.v_inf_mode.set("files" if self._inf_files else "auto" if _inf else "none")
+        _k = getattr(cfg, "osm_trail_kinds", None) or ["informal"]
+        self.v_osm_inf.set("informal" in _k)
+        self.v_osm_unp.set("unpaved" in _k)
         self._inf_changed()
         self.v_minshare.set(f"{float(getattr(cfg, 'min_share_pct', 25.0)):g}")
         for k, v in self.v_formats.items():
@@ -3637,11 +3657,39 @@ def read_lesopat(path: str, quiet: bool = False, return_all: bool = False):
     return (g_cat, g_all) if return_all else g_cat
 
 
-def download_informal_trails_osm(bbox_wgs84, out_dir) -> Path | None:
-    """Стихийные тропы OSM (линии с тегом informal=yes) через Overpass API → GeoJSON (WGS 84).
-    При неудаче (нет интернета, Overpass недоступен) возвращает None — скрипт продолжит без слоя."""
+OSM_UNPAVED_HIGHWAY = "path|footway|track|bridleway"
+OSM_UNPAVED_SURFACE = "ground|dirt|earth|grass|mud|sand|unpaved"
+OSM_TRAIL_KIND_TITLE = {"informal": "стихийные", "unpaved": "грунтовые"}
+
+
+def osm_trails_query(bbox_wgs84, kinds=("informal",)) -> str:
+    """Запрос Overpass: стихийные (informal=yes) и/или грунтовые тропы (highway=path|footway|track|
+    bridleway с surface=ground|dirt|earth|grass|mud|sand|unpaved)."""
     w, s, e, n = [float(x) for x in bbox_wgs84]          # total_bounds: (minx, miny, maxx, maxy)
-    q = f'[out:json][timeout:90];way["informal"="yes"]({s:.6f},{w:.6f},{n:.6f},{e:.6f});out geom;'
+    bb = f"({s:.6f},{w:.6f},{n:.6f},{e:.6f})"
+    parts = []
+    if "informal" in kinds:
+        parts.append(f'way["informal"="yes"]{bb};')
+    if "unpaved" in kinds:
+        parts.append(f'way["highway"~"^({OSM_UNPAVED_HIGHWAY})$"]["surface"~"^({OSM_UNPAVED_SURFACE})$"]{bb};')
+    return "[out:json][timeout:90];(" + "".join(parts) + ");out geom;"
+
+
+def _osm_trail_kind(tags: dict) -> str:
+    t = tags or {}
+    inf = str(t.get("informal", "")).lower() == "yes"
+    unp = (re.fullmatch(OSM_UNPAVED_HIGHWAY, str(t.get("highway", ""))) is not None
+           and re.fullmatch(OSM_UNPAVED_SURFACE, str(t.get("surface", ""))) is not None)
+    return "стихийная, грунтовая" if inf and unp else "стихийная" if inf else "грунтовая" if unp else ""
+
+
+def download_informal_trails_osm(bbox_wgs84, out_dir, kinds=("informal",)) -> Path | None:
+    """Тропы OSM через Overpass API → GeoJSON (WGS 84): стихийные (informal=yes) и/или грунтовые.
+    При неудаче (нет интернета, Overpass недоступен) возвращает None — скрипт продолжит без слоя."""
+    kinds = [k for k in (kinds or ["informal"]) if k in OSM_TRAIL_KIND_TITLE] or ["informal"]
+    q = osm_trails_query(bbox_wgs84, kinds)
+    log.info("Тропы OSM (%s): запрос Overpass: %s",
+             ", ".join(OSM_TRAIL_KIND_TITLE[k] for k in kinds), q)
     data = None
     for url in OVERPASS_ENDPOINTS:
         try:
@@ -3656,23 +3704,28 @@ def download_informal_trails_osm(bbox_wgs84, out_dir) -> Path | None:
         log.warning("Стихийные тропы OSM не скачаны (Overpass API недоступен) — слой пропущен, "
                     "правила «только стихийные тропы» используют всю дорожно-тропиночную сеть")
         return None
-    lines, ids = [], []
+    lines, ids, kd, hw, sf = [], [], [], [], []
     for el in data.get("elements", []):
         if el.get("type") != "way" or "geometry" not in el:
             continue
         coords = [(p["lon"], p["lat"]) for p in el["geometry"]]
         if len(coords) >= 2:
+            tg = el.get("tags") or {}
             lines.append(LineString(coords))
             ids.append(el.get("id"))
+            kd.append(_osm_trail_kind(tg))
+            hw.append(tg.get("highway", ""))
+            sf.append(tg.get("surface", ""))
     if not lines:
-        log.warning("В OSM нет линий informal=yes в границах территории")
+        log.warning("В OSM нет троп (%s) в границах территории", ", ".join(OSM_TRAIL_KIND_TITLE[k] for k in kinds))
         return None
-    g = gpd.GeoDataFrame({"osm_id": ids}, geometry=lines, crs=4326)
+    g = gpd.GeoDataFrame({"osm_id": ids, "kind": kd, "highway": hw, "surface": sf}, geometry=lines, crs=4326)
     out = Path(out_dir) if str(out_dir or "").strip() else Path.cwd()
     out.mkdir(parents=True, exist_ok=True)
     p = out / "informal_trails_osm.geojson"
     g.to_file(p, driver="GeoJSON", encoding="utf-8")
-    log.info("Стихийные тропы OSM (informal=yes): %d сегментов → %s", len(g), p.name)
+    log.info("Тропы OSM: %d сегментов (%s) → %s", len(g),
+             ", ".join(f"{k} — {v}" for k, v in g["kind"].value_counts().items()), p.name)
     return p
 
 
@@ -4131,7 +4184,8 @@ class Data:
         files = [x for x in paths if x.lower() not in ("auto", "авто", "osm")]
         if auto:
             try:
-                p = download_informal_trails_osm(self.bbox_wgs84, cfg.out_dir)
+                p = download_informal_trails_osm(self.bbox_wgs84, cfg.out_dir,
+                                                 getattr(cfg, "osm_trail_kinds", None) or ["informal"])
                 if p is not None:
                     files.append(str(p))
             except Exception as e:
@@ -4601,7 +4655,12 @@ def write_diagnostics(out: Path, data, res):
 def _inf_label() -> str:
     """Подпись слоя стихийных троп: «… OSM» при автоскачивании, «… (свой слой)» при своём файле."""
     v = [str(x).strip().lower() for x in (getattr(_CUR_CFG, "informal_trails", None) or ["auto"])]
-    return "стихийные тропы OSM" if any(x in ("auto", "авто", "osm") for x in v) else "стихийные тропы (свой слой)"
+    if not any(x in ("auto", "авто", "osm") for x in v):
+        return "стихийные тропы (свой слой)"
+    k = getattr(_CUR_CFG, "osm_trail_kinds", None) or ["informal"]
+    if "unpaved" in k and "informal" in k:
+        return "стихийные и грунтовые тропы OSM"
+    return "грунтовые тропы OSM" if "unpaved" in k else "стихийные тропы OSM"
 
 
 class Results:
