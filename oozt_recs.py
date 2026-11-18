@@ -4833,7 +4833,12 @@ class Data:
                 if p is not None:
                     files.append(str(p))
             except Exception as e:
+                p = None
                 log.warning("Грунтовые дороги и тропы: скачивание из OSM не удалось (%s)", e)
+            prev = Path(cfg.out_dir or ".") / "informal_trails_osm.geojson"
+            if p is None and prev.exists():
+                files.append(str(prev))      # слой, скачанный при прошлом прогоне в эту папку
+                log.warning("Грунтовые дороги и тропы: используется слой OSM прошлого прогона — %s", prev)
         if not files:
             if not paths:
                 log.info("Грунтовые дороги и тропы: не используются (выбрано «не использовать»)")
@@ -6463,12 +6468,46 @@ def rule_struct_class(data: Data, res: Results, measure: dict, p: dict):
 
 
 # ---- 3.1 / 3.2: грунтовые дороги и тропы в выделах с видами Красной книги ---------------------------
+UNPAVED_NET_HIGHWAY = ("path", "track", "bridleway")     # грунтовые по типу линии, если нет поля покрытия
+UNPAVED_NET_SURFACE = ("unpaved", "dirt", "ground", "earth", "grass", "gravel", "fine_gravel", "compacted",
+                       "sand", "mud", "pebblestone", "woodchips", "grass_paver")
+
+
+def _unpaved_from_network(data: Data):
+    """Грунтовые дороги и тропы из дорожно-тропиночной сети (если слой OSM / свой слой не получен):
+    по полю покрытия (surface) — грунтовые покрытия; без него — типы path, track, bridleway (fclass / highway);
+    без атрибутов — вся сеть. Возвращает (слой или None, пояснение)."""
+    t = data.trails
+    if t is None or t.empty:
+        return None, ""
+    cols = {str(c).lower(): c for c in t.columns if c != "geometry"}
+    if "surface" in cols:
+        sv = t[cols["surface"]].astype(str).str.lower().str.strip()
+        m = sv.isin(UNPAVED_NET_SURFACE)
+        if m.any():
+            return t[m].copy(), "линии с грунтовым покрытием (поле «surface»)"
+    for k in ("highway", "fclass", "type"):
+        if k in cols:
+            hv = t[cols[k]].astype(str).str.lower().str.strip()
+            m = hv.isin(UNPAVED_NET_HIGHWAY) | hv.str.startswith("track_grade")
+            if m.any():
+                return t[m].copy(), f"типы {', '.join(UNPAVED_NET_HIGHWAY)} (поле «{cols[k]}»)"
+    return t, "вся сеть (нет полей покрытия и типа линии)"
+
+
 def rule_rare_trail_vydel(data: Data, res: Results, measure: dict, p: dict):
     """Выделы с плотностью грунтовых дорог и троп > порога и находками видов КК Москвы заданных категорий."""
     trails = data.trails_informal if p.get("informal_only", True) else data.trails
+    if p.get("informal_only", True) and (trails is None or trails.empty):
+        # слой OSM / свой слой не получен — грунтовые дороги и тропы берутся из дорожно-тропиночной сети
+        trails, how = _unpaved_from_network(data)
+        if trails is not None:
+            log.warning("  слой грунтовых дорог и троп (OSM или свой слой) не загружен — используется "
+                        "дорожно-тропиночная сеть: %s (%d сегментов)", how, len(trails))
     if trails is None or trails.empty:
         log.warning("  %s: слой %s не загружен — пропуск", measure["name"],
-                    "грунтовых дорог и троп (OSM или свой слой)" if p.get("informal_only", True) else "троп")
+                    "грунтовых дорог и троп (OSM или свой слой) и дорожно-тропиночной сети"
+                    if p.get("informal_only", True) else "троп")
         return
     p_sel = dict(p, groups=None, sources=[s for s in (p.get("sources") or ["points", "polygons"]) if s != "sdm"]
                  or ["points", "polygons"])
@@ -9704,9 +9743,24 @@ def write_qgis_project(out: Path, cfg: Config, data: "Data", gpkg: Path, terr_la
 #                                       MAIN
 # =====================================================================================
 def _setup_logging(out: Path, name="run.log"):
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s  %(message)s", datefmt="%H:%M:%S",
-                        handlers=[logging.StreamHandler(sys.stdout),
-                                  logging.FileHandler(out / name, encoding="utf-8", mode="w")])
+    """Журнал прогона в out/run.log (+ консоль). Журнал уже мог быть настроен в main() или окном —
+    тогда basicConfig ничего не делает и run.log оставался пустым; поэтому файл добавляется явно,
+    прежние файловые журналы снимаются, а прочие обработчики (окно хода расчёта) сохраняются."""
+    root = logging.getLogger()
+    root.setLevel(logging.INFO)
+    fmt = logging.Formatter("%(asctime)s %(levelname)s  %(message)s", datefmt="%H:%M:%S")
+    for h in list(root.handlers):
+        if isinstance(h, logging.FileHandler):
+            root.removeHandler(h)
+            h.close()
+    if not any(type(h) is logging.StreamHandler for h in root.handlers):
+        sh = logging.StreamHandler(sys.stdout)
+        sh.setFormatter(fmt)
+        root.addHandler(sh)
+    fh = logging.FileHandler(out / name, encoding="utf-8", mode="w")
+    fh.setFormatter(fmt)
+    fh.setLevel(logging.INFO)
+    root.addHandler(fh)
 
 
 def _prep_gpkg_gdf(gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
