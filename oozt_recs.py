@@ -124,12 +124,11 @@ import geopandas as gpd
 import pyogrio
 import rasterio
 from rasterio import features as rfeatures
-from rasterio.warp import reproject, Resampling, calculate_default_transform
+from rasterio.warp import reproject, Resampling
 from rasterio.transform import from_origin
 from shapely.geometry import shape, box, Point, LineString
 from shapely.ops import unary_union
 from shapely.validation import make_valid
-import shapely
 from scipy import ndimage
 
 import matplotlib
@@ -232,7 +231,7 @@ def repair_geometries(g: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
     return g if not g.empty else None
 
 
-def _safe_union(geoms) -> "BaseGeometry":
+def _safe_union(geoms):
     """unary_union с починкой: make_valid по каждому; при TopologyException —
     buffer(0) по одному; если и это не спасает — пересечение коробок."""
     if geoms is None:
@@ -335,7 +334,7 @@ STRUCT_CODE_CLASSES = {
     231: "Гидроморфные луга", 232: "Гидроморфные луга", 233: "Гидроморфные луга",
     310: "Болота", 400: "Вода", 501: "Антропогенные", 503: "Антропогенные",
 }
-# I.7 «Мозаичное выкашивание»: косим все луга, включая бурьян (222); гидроморфные луга (231–233) не косим
+# CAPEX-1-1/1-2 «Мозаичное выкашивание»: косим все луга, включая бурьян (222); гидроморфные луга (231–233) не косим
 STRUCT_MOW_DEFAULT = ("Суходольные луга", "Мезофитные луга", "Мезофитные луга (антропогенные)")
 
 
@@ -430,7 +429,9 @@ class Config:
     dem_path: str | None = None
     trails: list[str] = field(default_factory=list)
     informal_trails: list = field(default_factory=lambda: ["auto"])   # ["auto"] — скачать из OSM (informal=yes); список путей — свой слой; [] — не использовать
-    osm_trail_kinds: list = field(default_factory=lambda: ["informal"])  # что скачивать из OSM: informal — стихийные, unpaved — грунтовые
+    # что скачивать из OSM: informal — informal=yes; unpaved — грунтовые все (surface=ground|dirt|earth|grass|mud|
+    # unpaved); unpaved_inf — грунтовые неорганизованные (surface=dirt|unpaved|grass|mud)
+    osm_trail_kinds: list = field(default_factory=lambda: ["informal", "unpaved"])
     osm_source: str = "auto"         # откуда брать тропы OSM: auto (Overpass → BBBike → Geofabrik) | overpass | bbbike | geofabrik | pbf
     osm_pbf: str = ""                # свой файл OSM (.osm.pbf / .osm) при osm_source = "pbf"
     osm_cache_dir: str = ""          # папка для скачанных .pbf (пусто — osm_cache рядом со скриптом)
@@ -439,13 +440,13 @@ class Config:
     roads_dirt: list[str] = field(default_factory=list)   # грунтовые дороги: «Колокольчик», карты
     hydro_lines: list[str] = field(default_factory=list)
     hydro_polys: list[str] = field(default_factory=list)
-    drainage: list[str] = field(default_factory=list)    # дренажные канавы (линии) — мероприятие III.8 и слой рек
-    wetlands: list[str] = field(default_factory=list)    # болота (полигоны) — мероприятие I.8
+    drainage: list[str] = field(default_factory=list)    # дренажные канавы (линии) — мероприятие CAPEX-2-3 и слой рек
+    wetlands: list[str] = field(default_factory=list)    # болота (полигоны) — мероприятие CAPEX-1-3
     recreation: list[str] = field(default_factory=list)   # рекреационные объекты (точки) — тепловая карта на схемах
     lesopat_points: list[str] = field(default_factory=list)  # лесопатология: ПВН (Excel или вектор с категорией)
-    # справочник водоёмов и болот ООЗТ (Excel; отметки мероприятий I.8, I.9, I.11, III.7); пусто — refdata/
+    # справочник водоёмов и болот ООЗТ (Excel; отметки мероприятий CAPEX-1-3, 1-4, 1-5, 3-5); пусто — refdata/
     water_ref: str | None = None
-    # справочник цветения охраняемых растений (Excel; сроки III.4 и синонимы); пусто — refdata/
+    # справочник цветения охраняемых растений (Excel; сроки CAPEX-3-2 и синонимы); пусто — refdata/
     flowering_ref: str | None = None
     # слои видов и редких экосистем: [{path, category, group, kind, field}], см. SPECIES_*
     species_layers: list = field(default_factory=list)
@@ -454,6 +455,14 @@ class Config:
     basemap: bool = True
     min_share_pct: float = 25.0          # мин. доля полигона под участком-основанием (тропы, уклон, вороны, SDM), %
     split_multipart: bool = True         # многочастный объект → отдельные контуры (ID-1, ID-2, …)
+    # ---- параметры мероприятий (окно скрипта, раздел «Параметры мероприятий»; общие для всех ООЗТ)
+    i3_thr_mode: str = "quantile"        # CAPEX-2-1: порог плотности троп в окне 250 м — quantile | value
+    i3_quantile: float = 0.90            # CAPEX-2-1: квантиль по ячейкам окна внутри каждой ООЗТ
+    i3_value_m_ha: float = 250.0         # CAPEX-2-1: порог-значение, м/га (при i3_thr_mode = value)
+    rare_trail_m_ha: float = 100.0       # CAPEX-3-1/3-2: порог плотности грунтовых дорог и троп в выделе, м/га
+    mow_q1_min_ha: float | None = 1.0    # CAPEX-1-1: выкашивание 1 очереди — луга от … га (включительно)
+    mow_q1_max_ha: float | None = 5.0    # CAPEX-1-1: … до … га включительно; крупнее — 2 очередь (CAPEX-1-2)
+    reintro_min_ha: float = 2.0          # CAPEX-2-4: реинтродукция — только участки крупнее, га
     report_formats: list = field(default_factory=lambda: ["docx", "pdf"])  # docx, pdf, doc; report.md — всегда
     fields: dict = field(default_factory=dict)      # kv_vyd: OOZT, KV, VYD, TYPE, NAME; eco: ID, TYPE, NAME, OOZT
 
@@ -537,24 +546,24 @@ LAYER_SPECS = [
               "справочник «ООЗТ — водоём — тип — площадь»"),
     dict(key="drainage", title="Дренажные канавы", multi=True, kind="vec",
          what="линии; добавляются к рекам на картах и включают мероприятие "
-              "«Прочистка дренажной системы» (III.8)"),
+              "«Прочистка дренажной системы» (CAPEX-2-3)"),
     dict(key="wetlands", title="Болота (вектор)", multi=True, kind="vec",
          what="полигоны болот/заболоченных участков — для мероприятия "
-              "«Частичное удаление деревьев и кустарников на болотах» (I.8)"),
+              "«Частичное удаление деревьев и кустарников на болотах» (CAPEX-1-3)"),
     dict(key="recreation", title="Рекреационные объекты (точки)", multi=True, kind="vec",
          what="точки (площадки, навесы, беседки, инфраструктура отдыха) — тепловая карта "
               "концентрации на схемах кварталов; поле категории объекта, если есть"),
     dict(key="water_ref", title="Справочник водоёмов и болот (Excel)", multi=False, kind="xls",
          what="лист «Битца и Измайлово» / «Все ООЗТ Москвы»: объекты с координатами и отметками "
-              "мероприятий I.8, I.9, I.11, III.7 (1 / да / + / ●); по умолчанию — refdata/"
+              "мероприятий CAPEX-1-3, CAPEX-1-4, CAPEX-1-5, CAPEX-3-5 (1 / да / + / ●); по умолчанию — refdata/"
               "Справочник_водоёмов_и_болот_ООЗТ_Москвы.xlsx"),
     dict(key="flowering_ref", title="Справочник цветения охраняемых растений (Excel)", multi=False, kind="xls",
          what="лист «Справочник»: латинские названия (в слое и по Красной книге — синонимы), месяцы "
-              "цветения IV–IX (●) — сроки III.4; по умолчанию — refdata/okhranyaemye_rasteniya_tsvetenie.xlsx"),
+              "цветения IV–IX (●) — сроки CAPEX-3-2; по умолчанию — refdata/okhranyaemye_rasteniya_tsvetenie.xlsx"),
     dict(key="lesopat_points", title="Лесопатология: ПВН (точки)", multi=True, kind="vec_xls",
          what="Excel с описаниями ПВН (PVN_…xlsx: «№ ПВН», «Рекомендации», «Широта/Долгота») "
               "либо векторный слой (.gpkg, .shp) с полями «Рекомендации» / «recomend*» или «Категория». "
-              "Мероприятия V.1–V.6 назначаются по этим точкам"),
+              "Мероприятия OPEX-4-1 … OPEX-4-6 назначаются по этим точкам"),
 ]
 LAYER_TITLE = {s["key"]: s["title"] for s in LAYER_SPECS}
 LAYER_TITLE["species"] = "Слои видов и редких экосистем"
@@ -645,9 +654,50 @@ def species_layer_label(l: dict) -> str:
             f"{SPECIES_KINDS.get(l['kind'], l['kind'] or '?')})")
 
 
+# ---- коды мероприятий ------------------------------------------------------------------
+# Классификация «CAPEX / OPEX»: базовая группа — группа мероприятий (сквозная нумерация 1–5) —
+# мероприятие (нумерация в группе с 1): «CAPEX-1-1», «OPEX-4-1». Прежние римские коды (I.7, III.3…)
+# понимаются как синонимы — старые таблицы, справочники и конфигурации продолжают работать.
+BASE_GROUPS = {"CAPEX": "CAPEX — капитальные мероприятия", "OPEX": "OPEX — операционные мероприятия"}
+MEASURE_GROUPS = {
+    1: ("CAPEX", "1. Поддержание природных сообществ"),
+    2: ("CAPEX", "2. Восстановление природных сообществ"),
+    3: ("CAPEX", "3. Минимизация последствий рекреационного воздействия"),
+    4: ("OPEX", "4. Уход за древесными насаждениями"),
+    5: ("OPEX", "5. Рекреационное обустройство и обеспечение безопасности посетителей"),
+}
+CODE_ALIASES = {
+    "I.7": "CAPEX-1-1", "I.8": "CAPEX-1-3", "III.7": "CAPEX-1-4", "I.9": "CAPEX-1-5", "I.6": "CAPEX-1-6",
+    "I.3": "CAPEX-2-1", "II.1": "CAPEX-2-2", "III.8": "CAPEX-2-3", "I.12": "CAPEX-2-4", "II.2": "CAPEX-2-5",
+    "I.2": "CAPEX-2-6",
+    "III.3": "CAPEX-3-1", "III.4": "CAPEX-3-2", "III.5": "CAPEX-3-3", "I.10": "CAPEX-3-4", "I.11": "CAPEX-3-5",
+    "III.2": "CAPEX-3-6", "III.6": "CAPEX-3-8",
+    "V.1": "OPEX-4-1", "V.2": "OPEX-4-2", "V.3": "OPEX-4-3", "V.4": "OPEX-4-4", "V.5": "OPEX-4-5",
+    "V.6": "OPEX-4-6", "I.1": "OPEX-4-7",
+    "IV.1": "OPEX-5-2", "IV.5": "OPEX-5-3", "IV.4": "OPEX-5-4", "IV.6": "OPEX-5-5", "III.9": "OPEX-5-7",
+    "IV.2": "OPEX-5-8", "IV.3": "OPEX-5-9",
+}
+CODE_RE_TXT = r"(?:CAPEX|OPEX)-\d+-\d+|[IVX]+\.\d+"
+_NEW_CODE_RE = re.compile(r"^(CAPEX|OPEX)-(\d+)-(\d+)$")
+
+
+def canon_code(code) -> str:
+    """Код мероприятия в новой нумерации: «III.3» → «CAPEX-3-1»; «capex-1-1» → «CAPEX-1-1»."""
+    t = re.sub(r"\s+", "", str(code or "")).upper().replace("–", "-").replace("—", "-")
+    return CODE_ALIASES.get(t, t)
+
+
+def code_group(code) -> tuple[str, str]:
+    """Код → (базовая группа «CAPEX — …», группа «1. …»); для нераспознанного кода — («», «»)."""
+    m = _NEW_CODE_RE.match(canon_code(code))
+    if not m:
+        return "", ""
+    base, title = MEASURE_GROUPS.get(int(m.group(2)), (m.group(1), ""))
+    return BASE_GROUPS.get(base, base), title
+
+
 # ---- правила назначения ---------------------------------------------------------------
 REQ, SHARED = "__обязательно__", "__окно__"      # параметр обязателен / берётся из окна скрипта
-SPECIES_FILTERS = ("category", "groups", "taxon")
 RULES = {
     "type": dict(
         title="по типу полигона", data=[], opt=["hydro"],
@@ -656,9 +706,11 @@ RULES = {
              "только полигоны, пересекающие выбранные водные объекты (по названию из слоя гидрографии)."),
     "trail_density": dict(
         title="плотность троп в полигоне", data=["trails"], opt=[],
-        params=dict(types=None, quantile=0.75, abs_m_ha=None),
-        help="Длина троп внутри полигона / площадь полигона (м/га); назначается полигонам с плотностью "
-             "не ниже квантиля среди полигонов этих типов."),
+        params=dict(types=None),
+        help="Плотность троп в скользящем квадратном окне 250 × 250 м (шаг 10 м): длина троп в окне / 6,25 га. "
+             "Полигон назначается, если его центр (точка внутри полигона) попадает в окно с плотностью не ниже "
+             "порога. Порог задаётся в окне скрипта: квантиль (по умолчанию 0,90) по ячейкам внутри каждой "
+             "ООЗТ отдельно или значение, м/га. Участок работ — весь полигон."),
     "trail_hotspot": dict(
         title="участки повышенной плотности троп", data=["trails"], opt=[],
         params=dict(types=None, window=50.0, quantile=0.75, min_ha=0.05, min_share=SHARED),
@@ -685,7 +737,8 @@ RULES = {
                     dist=50.0, sdm=0.75, informal_only=False,
                     min_ha=0.05, min_share=SHARED, vydel_min_ha=None, vydel_max_ha=None),
         help="Тропы в заданном расстоянии от точек и внутри полигонов выбранных видов; по моделям SDM — "
-             "отдельная строка «мониторинг». «Только стихийные тропы» — считать по слою OSM informal=yes; "
+             "отдельная строка «мониторинг». «Только грунтовые дороги и тропы» — считать по слою грунтовых "
+             "дорог и троп OSM (или своему слою); "
              "можно ограничить категориями Красной книги Москвы."),
     "species_density": dict(
         title="виды: плотность находок", data=["species"], opt=[],
@@ -717,7 +770,7 @@ RULES = {
         title="по справочнику водоёмов", data=["water_ref"], opt=["hydro", "wetlands"],
         params=dict(),
         help="Объекты берутся из справочника водоёмов и болот ООЗТ (Excel): строки с отметкой в столбце "
-             "кода мероприятия (I.8, I.9, I.11, III.7; отметка — 1, да, + или ●). Точка объекта (широта, "
+             "кода мероприятия (CAPEX-1-3, CAPEX-1-4, CAPEX-1-5, CAPEX-3-5; прежние коды I.8, III.7, I.9, I.11 тоже понимаются; отметка — 1, да, + или ●). Точка объекта (широта, "
              "долгота WGS 84) привязывается к контуру: водоём — к полигону гидрографии, болото — к слою болот "
              "(если нет — к гидрографии); сначала полигон, содержащий точку, затем ближайший не дальше 30 м. "
              "ООЗТ и квартал определяются по геометрии (повторяющиеся номера кварталов Терлецкого массива "
@@ -726,20 +779,23 @@ RULES = {
              "в water_ref_unmatched.csv."),
     "struct_class": dict(
         title="по структурному классу", data=[], opt=[],
-        params=dict(struct_classes=STRUCT_MOW_DEFAULT),
+        params=dict(struct_classes=STRUCT_MOW_DEFAULT, mow_queue=None),
         help="Назначается полигонам заданных структурных классов (столбец «Структурные классы»; по умолчанию — "
              "суходольные, мезофитные и мезофитные антропогенные луга; гидроморфные луга не косят). Класс берётся "
              "из поля «Структурный класс», выбранного в окне скрипта (если не задано — из полей типа и названия); "
              "числовой код class_value (например, 5222) понимается по трём последним цифрам (222). Участок работ — "
-             "полигон экосистемы в границах ООЗТ."),
+             "полигон экосистемы в границах ООЗТ. «Очередь выкашивания» = 1 — полигоны площадью от … до … га "
+             "включительно (границы задаются в окне скрипта, по умолчанию 1–5 га), 2 — крупнее верхней границы; "
+             "пусто — без ограничения площади."),
     "rare_trail_vydel": dict(
-        title="виды КК: стихийные тропы в выделе", data=["species"], opt=["trails", "flowering"],
-        params=dict(category=None, groups=None, taxon=None, sources=None, kk_categories=(1, 2, 3),
-                    abs_m_ha=100.0, informal_only=True, vydel_min_ha=None, vydel_max_ha=None,
-                    season_flower=False),
-        help="Выдел любого типа назначается, если плотность стихийных троп в нём (длина стихийных троп — OSM "
-             "informal=yes или свой слой — внутри выдела / площадь, м/га) больше порога (100 м/га) и в выделе есть находка вида Красной "
-             "книги Москвы заданных категорий (1–3; с учётом синонимов). Ограничение по площади выдела: «Мин. "
+        title="виды КК: грунтовые дороги и тропы в выделе", data=["species"], opt=["trails", "flowering"],
+        params=dict(category=None, groups=None, taxon=None, sources=None,
+                    kk_categories=(0, 1, 2, 3, 4, 5, "О", "б/к"),
+                    informal_only=True, vydel_min_ha=None, vydel_max_ha=None, season_flower=False),
+        help="Выдел любого типа назначается, если плотность грунтовых дорог и троп в нём (OSM или свой слой — "
+             "длина внутри выдела / площадь, м/га) больше порога (задаётся в окне скрипта, по умолчанию "
+             "100 м/га) и в выделе есть находка вида Красной книги Москвы заданных категорий (по умолчанию все: "
+             "0–5, «О» и виды без категории — «б/к»; с учётом синонимов). Ограничение по площади выдела: «Мин. "
              "площадь выдела» — больше, «Макс. площадь выдела» — не больше. «Сроки по цветению» = да — "
              "сезонность записи берётся из справочника цветения (объединение месяцев видов выдела). Участок "
              "работ — весь выдел."),
@@ -760,6 +816,7 @@ RULES = {
              "понижения и западины — купальница и калужница."),
 }
 RULE_TITLES = [v["title"] for v in RULES.values()]
+RULE_TITLE_ALIASES = {"виды кк: стихийные тропы в выделе": "rare_trail_vydel"}
 
 # столбцы таблицы мероприятий, задающие правило (ключ, заголовок, начало заголовка для поиска, пояснение)
 SPEC_COLUMNS = [
@@ -774,11 +831,11 @@ SPEC_COLUMNS = [
     ("taxon", "Виды: таксоны (лат.)", "виды: такс",
      "латинские названия видов или родов через запятую (например, Corvus); пусто — все виды"),
     ("kk_categories", "КК Москвы: категории", "кк моск",
-     "категории Красной книги Москвы (0–5, «О») через запятую; например «1, 2, 3» — под угрозой исчезновения, "
-     "редкие и уязвимые; пусто — без учёта Красной книги"),
-    ("informal_only", "Только стихийные тропы", "только стихийные троп",
-     "«да» — тропы у находок считаются только по слою стихийных троп (скачивается из OSM informal=yes "
-     "или выбирается свой слой в окне); «нет» или пусто — по всей дорожно-тропиночной сети"),
+     "категории Красной книги Москвы (0–5, «О», «б/к» — вид из справочника без категории) через запятую; "
+     "например «1, 2, 3» — под угрозой исчезновения, редкие и уязвимые; пусто — без учёта Красной книги"),
+    ("informal_only", "Только грунтовые дороги и тропы", "только ",
+     "«да» — тропы считаются только по слою грунтовых дорог и троп (скачивается из OSM — грунтовые все или "
+     "неорганизованные — или выбирается свой слой в окне); «нет» или пусто — по всей дорожно-тропиночной сети"),
     ("sources", "Виды: данные", "виды: данн", "точки, полигоны, SDM (через запятую); «любые» или пусто — все"),
     ("dist", "Расстояние, м", "расстоян", "ширина полосы у воды или радиус вокруг точек видов"),
     ("window", "Окно плотности, м", "окно", "радиус скользящего окна для растра плотности"),
@@ -789,11 +846,9 @@ SPEC_COLUMNS = [
     ("min_share", "Мин. доля полигона, %", "мин. дол",
      "минимальная доля площади полигона под участками; пусто — общий порог из окна скрипта"),
     ("vydel_min_ha", "Мин. площадь выдела, га", "мин. площадь выдела",
-     "правило назначается только выделам больше этой площади (например, III.3 — больше 5 га)"),
+     "правило назначается только выделам больше этой площади (например, 5 — только выделы больше 5 га)"),
     ("vydel_max_ha", "Макс. площадь выдела, га", "макс. площадь выдела",
-     "правило назначается только выделам не больше этой площади (например, III.4 — не больше 5 га)"),
-    ("abs_m_ha", "Плотность троп, м/га (порог)", "плотность троп",
-     "абсолютный порог плотности троп в полигоне, м/га; пусто — квантиль"),
+     "правило назначается только выделам не больше этой площади (например, 5 — только выделы не больше 5 га)"),
     ("water_only", "Водоёмы (только)", "водоемы (только)",
      "названия водных объектов через запятую; назначаются только полигоны, пересекающие их "
      "(совпадение по части названия, например «Лебедянский»); требует слой гидрографии"),
@@ -820,8 +875,18 @@ SPEC_COLUMNS = [
     ("season_flower", "Сроки по цветению", "сроки по цвет",
      "«да» — сезонность записи по справочнику цветения охраняемых растений (объединение месяцев цветения "
      "видов КК в выделе; плаун годичный — VII–VIII); «нет» или пусто — сезонность из столбца «Сезонность»"),
+    ("mow_queue", "Очередь выкашивания", "очередь выкаш",
+     "1 — луга площадью от … до … га включительно (границы — в окне скрипта, по умолчанию 1–5 га); "
+     "2 — луга крупнее верхней границы; пусто — без ограничения площади"),
 ]
 SPEC_TITLE = {k: t for k, t, _, _ in SPEC_COLUMNS}
+# параметры, которые задаются не в таблице, а в окне скрипта (раздел «Параметры мероприятий»)
+SPEC_TITLE.update({
+    "win_m": "Окно плотности троп, м", "quantile": "Квантиль", "abs_m_ha": "Плотность троп, м/га (порог)",
+    "mow_lo_ha": "Площадь луга от, га", "mow_hi_ha": "Площадь луга до, га",
+    "min_patch_ha": "Участки крупнее, га",
+})
+I3_WINDOW_M = 250.0             # CAPEX-2-1: сторона квадратного окна плотности троп, м
 DESC_COLUMN = "Процедура назначения (как работает скрипт)"
 
 TYPE_WORDS = [("околовод", "околовод"), ("болот", "болот"), ("водн", "водн"), ("вод", "водн"),
@@ -996,16 +1061,24 @@ def _parse_value(key: str, raw):
             vals.append(v)
         return vals, None
     if key == "taxon":
+        if _norm_txt(t).replace(" ", "") == "посправочнику":
+            return [INVASIVE_REF_TAXON], None
         return (None, None) if _is_any(t) else (_split_list(t), None)
+    if key == "mow_queue":
+        v = t.strip().rstrip(".").removesuffix(".0")
+        return (int(v), None) if v in ("1", "2") else (None, f"очередь выкашивания — 1 или 2: «{t}»")
     if key in ("water_only", "water_except"):
         return (None, None) if _is_any(t) else (_split_list(t), None)
     if key == "kk_categories":                    # категории Красной книги Москвы: 0–5, «О»
         if _is_any(t):
             return None, None
         vals = []
-        for x in _split_list(t):
+        for x in _split_list(re.sub(r"б\s*/\s*к", "бк", str(t), flags=re.I)):   # «б/к» — не делить по «/»
             if x.upper() in ("О", "O"):
                 vals.append("О")
+                continue
+            if _norm_txt(x).replace(" ", "") in ("б/к", "бк", "безкатегории"):
+                vals.append("б/к")
                 continue
             try:
                 v = int(float(x))
@@ -1021,7 +1094,7 @@ def _parse_value(key: str, raw):
         return [x.strip() for x in re.split(r"[,;]", t) if x.strip()], None
     if key in ("informal_only", "season_flower"):  # «да» / «нет»
         v = t.lower().replace("ё", "е")
-        if v in ("да", "1", "истина", "true", "вкл", "только стихийные", "стихийные"):
+        if v in ("да", "1", "истина", "true", "вкл", "только стихийные", "стихийные", "грунтовые"):
             return True, None
         if v in ("нет", "0", "ложь", "false", "выкл", "все", "любые", "-"):
             return False, None
@@ -1058,6 +1131,8 @@ def rule_from_title(t) -> str | None:
     for k, v in RULES.items():
         if s == _norm(v["title"]) or s == k:
             return k
+    if s in RULE_TITLE_ALIASES:                      # прежние названия правил
+        return RULE_TITLE_ALIASES[s]
     for k, v in RULES.items():                       # без учёта двоеточий, кавычек и регистра
         if re.sub(r"[^а-яa-z ]", "", s) == re.sub(r"[^а-яa-z ]", "", _norm(v["title"])):
             return k
@@ -1141,7 +1216,31 @@ def measure_spec(measure: dict) -> dict:
         # пересекающему слой болот — столбец «Типы полигонов» не ограничивает
         p.pop("types", None)
         src.pop("types", None)
+    # параметры из окна скрипта (раздел «Параметры мероприятий»), общие для всех ООЗТ
+    ui = {}
+    if rule == "trail_density":
+        ui["win_m"] = I3_WINDOW_M
+        if str(ui_param("i3_thr_mode")) == "value":
+            ui["abs_m_ha"] = float(ui_param("i3_value_m_ha"))
+        else:
+            ui["quantile"] = float(ui_param("i3_quantile"))
+    elif rule == "rare_trail_vydel":
+        ui["abs_m_ha"] = float(ui_param("rare_trail_m_ha"))
+    elif rule == "struct_class" and p.get("mow_queue"):
+        ui["mow_lo_ha"], ui["mow_hi_ha"] = ui_param("mow_q1_min_ha"), ui_param("mow_q1_max_ha")
+    elif rule == "kolokolchik":
+        ui["min_patch_ha"] = ui_param("reintro_min_ha")
+    for k, v in ui.items():
+        p[k], src[k] = v, "окно скрипта"
     return dict(rule=rule, p=p, src=src, origin=origin, errors=errors, reason="")
+
+
+def ui_param(key: str):
+    """Параметр мероприятий из окна скрипта: текущая конфигурация или значение Config по умолчанию."""
+    cfg = globals().get("_CUR_CFG")
+    if cfg is not None and hasattr(cfg, key):
+        return getattr(cfg, key)
+    return Config.__dataclass_fields__[key].default
 
 
 def spec_share(p: dict) -> float:
@@ -1158,13 +1257,18 @@ def _q_txt(q) -> str:
     return "верхний квартиль (0,75)" if abs(float(q) - 0.75) < 1e-9 else f"квантиль {_fmt(q)}"
 
 
+def _taxa_txt(taxa) -> str:
+    return ", ".join("по справочнику инвазивных видов (кроме Heracleum sosnowskyi)" if t == INVASIVE_REF_TAXON
+                     else str(t) for t in taxa)
+
+
 def _sel_txt(p) -> str:
     """Какие слои видов выбирает мероприятие."""
     cat = ", ".join(p.get("category") or []) or "любые"
     grp = ", ".join(p.get("groups") or []) or "любые"
     parts = [f"категория — {cat}", f"группы — {grp}"]
     if p.get("taxon"):
-        parts.append("таксоны — " + ", ".join(p["taxon"]))
+        parts.append("таксоны — " + _taxa_txt(p["taxon"]))
     if p.get("kk_categories"):
         parts.append("КК Москвы — категории " + ", ".join(str(c) for c in p["kk_categories"]))
     if "sources" in p:
@@ -1200,10 +1304,10 @@ def describe_spec(spec: dict, full: bool = False) -> str:
             return (f"пересечение с полосой {_fmt(p['dist_min'])}–{_fmt(p['dist_max'])} м "
                     f"от дорожной сети; {_types_txt(p)}")
         if r == "trail_density":
-            if p.get("abs_m_ha"):
-                return (f"плотность троп на полигон ≥ {_fmt(p['abs_m_ha'])} м/га (абсолютный порог); "
-                        f"{_types_txt(p)}")
-            return f"плотность троп на полигон (м/га) ≥ {_q_txt(p['quantile'])}; {_types_txt(p)}"
+            w = _fmt(p.get("win_m") or I3_WINDOW_M)
+            thr = (f"{_fmt(p['abs_m_ha'])} м/га" if p.get("abs_m_ha") else
+                   f"{_q_txt(p.get('quantile') or 0.9)} по каждой ООЗТ")
+            return f"плотность троп в окне {w} × {w} м у центра полигона ≥ {thr}; {_types_txt(p)}"
         if r == "trail_hotspot":
             return (f"участки повышенной плотности троп (окно {_fmt(p['window'])} м, {_q_txt(p['quantile'])}); "
                     f"{_types_txt(p)}; {_patch_txt(p)}")
@@ -1219,7 +1323,7 @@ def describe_spec(spec: dict, full: bool = False) -> str:
             return f"находки видов ({sel}): полигоны с точками или полигонами находок{sdm}; {_types_txt(p)}"
         if r == "species_trails":
             at = _vydel_area_txt(p, "; только выделы ")
-            inf = "; только стихийные тропы OSM (informal=yes)" if p.get("informal_only") else ""
+            inf = f"; только {_inf_label()}" if p.get("informal_only") else ""
             return (f"тропы в {_fmt(p['dist'])} м от точек и в полигонах видов ({sel}){sdm}{at}{inf}; "
                     f"{_types_txt(p)}")
         if r == "species_density":
@@ -1237,16 +1341,17 @@ def describe_spec(spec: dict, full: bool = False) -> str:
         if r == "water_ref":
             return "объекты, отмеченные в справочнике водоёмов и болот ООЗТ (столбец кода мероприятия)"
         if r == "struct_class":
-            return "полигоны структурных классов: " + ", ".join(p.get("struct_classes") or STRUCT_MOW_DEFAULT)
+            return ("полигоны структурных классов: " + ", ".join(p.get("struct_classes") or STRUCT_MOW_DEFAULT)
+                    + _mow_queue_txt(p))
         if r == "rare_trail_vydel":
             kk = ", ".join(str(c) for c in (p.get("kk_categories") or []))
-            return (f"выделы с плотностью стихийных троп > {_fmt(p.get('abs_m_ha'))} м/га и находками видов КК "
+            return (f"выделы с плотностью грунтовых дорог и троп > {_fmt(p.get('abs_m_ha'))} м/га и находками видов КК "
                     f"Москвы (кат. {kk}){_vydel_area_txt(p, '; выделы ')}"
                     + ("; сроки — по справочнику цветения" if p.get("season_flower") else ""))
         if r == "kolokolchik":
             lo, hi = p.get("ring") or (500.0, 1000.0)
-            return (f"зоны: кольцо {lo:.0f}–{hi:.0f} м от границы, полоса {_fmt(p['road_dist'])} м от дорог, "
-                    f"граница выдела; {_types_txt(p)}")
+            return (f"кольцо {lo:.0f}–{hi:.0f} м от границы ∩ полоса {_fmt(p['road_dist'])} м от дорог с твёрдым "
+                    f"покрытием, участки > {_fmt(p.get('min_patch_ha') or 0)} га; {_types_txt(p)}")
     # ---- полное описание
     trails = ("слой троп (если в слое есть поле HIGHWAY или fclass, учитываются типы "
               + ", ".join(sorted(TRAIL_HIGHWAY_TYPES)) + ")")
@@ -1284,15 +1389,14 @@ def describe_spec(spec: dict, full: bool = False) -> str:
                 f"Мероприятие назначается каждому полигону, пересекающему полосу. В основании указывается ширина "
                 f"полосы; сама полоса показывается на схеме.")
     if r == "trail_density":
-        if p.get("abs_m_ha"):
-            return (f"Данные: {trails}. Для {tgt_each} считается плотность троп — длина троп внутри полигона, "
-                    f"делённая на его площадь (м/га). Мероприятие назначается полигонам с плотностью не ниже "
-                    f"абсолютного порога {_fmt(p['abs_m_ha'])} м/га (шкала рекреационной нагрузки: 50 — повышенная, "
-                    "100–150 — критическая). Полигон оценивается целиком, порог доли не применяется.")
-        return (f"Данные: {trails}. Для {tgt_each} считается плотность троп — длина троп внутри полигона, "
-                f"делённая на его площадь (м/га). Среди этих полигонов с ненулевой плотностью вычисляется {q}. "
-                "Мероприятие назначается полигонам с плотностью не ниже порога; полигон оценивается целиком, "
-                "порог доли не применяется. На схеме красным показаны тропы внутри зон повышенной плотности.")
+        w = _fmt(p.get("win_m") or I3_WINDOW_M)
+        thr = (f"значение {_fmt(p['abs_m_ha'])} м/га" if p.get("abs_m_ha") else
+               f"{_q_txt(p.get('quantile') or 0.9)} плотности по ячейкам внутри каждой ООЗТ отдельно")
+        return (f"Данные: {trails}. 1) Плотность троп считается в скользящем квадратном окне {w} × {w} м с шагом "
+                f"{_fmt(CELL)} м: длина троп в окне, делённая на площадь окна (м/га). 2) Порог — {thr} (задаётся в "
+                f"окне скрипта). 3) Для {tgt_each} берётся центр (точка внутри полигона); мероприятие назначается, "
+                "если плотность в окне у центра не ниже порога. Участок работ — весь полигон; порог доли не "
+                "применяется. На схеме красным показаны тропы в ячейках с плотностью не ниже порога.")
     if r == "trail_hotspot":
         return f"Данные: {trails}. 1) {hot} 2) Для {tgt_each} считается площадь таких участков внутри него. {fin}"
     if r == "shore":
@@ -1378,7 +1482,8 @@ def describe_spec(spec: dict, full: bool = False) -> str:
                 "назначается (замены другим правилом нет).")
     if r == "struct_class":
         cls = ", ".join(p.get("struct_classes") or STRUCT_MOW_DEFAULT)
-        return (f"Назначается полигонам экосистем структурных классов: {cls}. Класс берётся из поля «Структурный "
+        return (f"Назначается полигонам экосистем структурных классов: {cls}{_mow_queue_txt(p)}. Класс берётся из "
+                "поля «Структурный "
                 "класс» слоя территории (выбирается в окне скрипта; если не задано — из полей типа и названия) и "
                 "сравнивается с названием целиком без учёта регистра и ё/е; числовой код class_value понимается "
                 "по трём последним цифрам (211, 212 — суходольные луга; 221, 223, 224 — мезофитные; 222 — "
@@ -1387,8 +1492,8 @@ def describe_spec(spec: dict, full: bool = False) -> str:
     if r == "rare_trail_vydel":
         kk = ", ".join(str(c) for c in (p.get("kk_categories") or []))
         at = _vydel_area_txt(p, " Учитываются только выделы площадью ")
-        return (f"{sp} Для каждого выдела любого типа считается плотность стихийных троп — длина стихийных "
-                f"троп (OSM informal=yes или свой слой) внутри выдела, делённая на его площадь (м/га). Мероприятие назначается, если "
+        return (f"{sp} Для каждого выдела любого типа считается плотность грунтовых дорог и троп — их длина "
+                f"(OSM или свой слой) внутри выдела, делённая на его площадь (м/га). Мероприятие назначается, если "
                 f"плотность больше {_fmt(p.get('abs_m_ha'))} м/га и в выделе есть хотя бы одна находка вида "
                 f"Красной книги Москвы категорий {kk} (названия сравниваются с учётом синонимов справочника "
                 f"цветения).{at + '.' if at else ''} Участок работ — весь выдел; в основании — виды и их "
@@ -1397,13 +1502,26 @@ def describe_spec(spec: dict, full: bool = False) -> str:
                    "(плаун годичный — VII–VIII)." if p.get("season_flower") else ""))
     if r == "kolokolchik":
         lo, hi = p.get("ring") or (500.0, 1000.0)
-        return (f"Высаживание видов Красной книги в типичных местообитаниях. Зоны: кольцо "
-                f"{lo:.0f}–{hi:.0f} м от границы парка (внутрь), полоса {_fmt(p['road_dist'])} м от дорог "
-                f"с твёрдым покрытием (если слой дорог не задан — полоса не учитывается) и полоса вдоль "
-                f"границ выделов. Мероприятие назначается полигонам заданных типов местообитаний, "
-                f"пересекающим зоны; в основании — перечень зон и список высаживаемых видов: "
+        return (f"Реинтродукция видов Красной книги в типичных местообитаниях. Участок — пересечение выдела "
+                f"заданного типа местообитания с кольцом {lo:.0f}–{hi:.0f} м от границы парка (внутрь) и полосой "
+                f"{_fmt(p['road_dist'])} м от дорог с твёрдым покрытием (если слой дорог не задан — только "
+                f"кольцо). Назначаются только участки площадью больше {_fmt(p.get('min_patch_ha') or 0)} га "
+                f"(порог — в окне скрипта); в основании — зоны и список высаживаемых видов: "
                 f"широколиственный лес — первоцветы и колокольчик широколиственный; луга естественные — "
                 f"колокольчики персиколистный и раскидистый; понижения и западины — купальница и калужница.")
+    return ""
+
+
+def _mow_queue_txt(p: dict) -> str:
+    """Очередь мозаичного выкашивания и границы площади (из окна скрипта)."""
+    q, lo, hi = p.get("mow_queue"), p.get("mow_lo_ha"), p.get("mow_hi_ha")
+    if q == 1:
+        rng = " ".join(x for x in ((f"от {_fmt(lo)}" if lo is not None else ""),
+                                   (f"до {_fmt(hi)}" if hi is not None else "")) if x)
+        return f"; 1 очередь — полигоны площадью {rng} га включительно" if rng else "; 1 очередь — любой площади"
+    if q == 2:
+        return (f"; 2 очередь — полигоны площадью больше {_fmt(hi)} га" if hi is not None
+                else "; 2 очередь не формируется (верхняя граница 1 очереди не задана)")
     return ""
 
 
@@ -1428,7 +1546,9 @@ def spec_params_lines(spec: dict) -> list[str]:
         src = spec["src"].get(k, "")
         if k == "types":
             val = v[1] if v else "любые"
-        elif k in ("category", "groups", "taxon"):
+        elif k == "taxon":
+            val = _taxa_txt(v) if v else "любые"
+        elif k in ("category", "groups"):
             val = ", ".join(v) if v else "любые"
         elif k == "sources":
             val = ", ".join(SPECIES_KINDS[s] for s in v) if v else "точки, полигоны, SDM"
@@ -1459,7 +1579,8 @@ def matching_species_layers(cfg, p: dict, kinds=None) -> list[dict]:
     """Загруженные слои видов, подходящие мероприятию по категории, группе и типу данных."""
     out = []
     for l in species_layers(cfg):
-        if p.get("category") and l["category"] not in p["category"]:
+        # инвазивные виды распознаются и по справочнику — подходит слой любой категории
+        if p.get("category") and l["category"] not in p["category"] and "инвазивные" not in p["category"]:
             continue
         if not group_matches(l["group"], p.get("groups")):
             continue
@@ -1598,9 +1719,12 @@ VEC_XLS_TYPES = [
 JSON_TYPES = [("Конфигурация", "*.json"), ("Все файлы", "*.*")]
 NONE_FIELD = "— нет —"
 
-# поле структурного класса (I.7 «Мозаичное выкашивание»): задаётся пользователем, необязательно
-STRUCT_FIELD, STRUCT_FIELD_TITLE = "STRUCT", "Структурный класс (для выкашивания)"
+# поле «Структурный класс» — тип полигона для правил и мозаичное выкашивание CAPEX-1-1/1-2 (одно поле окна);
+# ключ STRUCT — из прежних конфигураций (отдельное поле структурного класса), понимается при загрузке
+STRUCT_FIELD = "STRUCT"
 STRUCT_FIELD_CANDS = ["Структурный класс", "Структурный_класс", "Struct_class", "STRUCT"]
+TYPE_FIELD_TITLE = "Структурный класс"
+TYPE_FIELD_CANDS = STRUCT_FIELD_CANDS + ["class_value", "Type", "TYPE", "Тип"]
 
 # поля слоя территории: ключ, подпись, обязательность, кандидаты для автоподбора
 FIELD_SPECS = {
@@ -1608,26 +1732,23 @@ FIELD_SPECS = {
         ("OOZT", "ООЗТ", True, ["OOZT", "ООЗТ", "Name_OOZT"]),
         ("KV", "Квартал", True, ["KV", "FID_kv", "kv", "Квартал", "kvartal"]),
         ("VYD", "Выдел", True, ["VYD", "FID_ecosys", "vyd", "Выдел", "vydel"]),
-        ("TYPE", "Тип (лес / луг / водные / околоводные)", True, ["Type", "TYPE", "Тип"]),
+        ("TYPE", TYPE_FIELD_TITLE, True, TYPE_FIELD_CANDS),
         ("NAME", "Название экосистемы", False, ["Name", "NAME", "Название", "Ecosystem"]),
-        (STRUCT_FIELD, STRUCT_FIELD_TITLE, False, STRUCT_FIELD_CANDS),
     ],
     "eco": [
         ("ID", "Уникальный ID экосистемы", True, ["ID", "Id", "id", "eco_id", "ECO_ID", "uid", "UID",
                                                   "FID_ecosys", "fid_1"]),
-        ("TYPE", "Тип (лес / луг / водные / околоводные)", True, ["Type", "TYPE", "Тип"]),
+        ("TYPE", TYPE_FIELD_TITLE, True, TYPE_FIELD_CANDS),
         ("NAME", "Название экосистемы", False, ["Name", "NAME", "Название", "Ecosystem"]),
         ("OOZT", "ООЗТ (если поля нет — название ниже)", False, ["OOZT", "ООЗТ", "Name_OOZT"]),
-        (STRUCT_FIELD, STRUCT_FIELD_TITLE, False, STRUCT_FIELD_CANDS),
     ],
     # kv_cut: поля слоя экосистем; квартал и выдел назначаются разрезанием (kvnet_*)
     "kv_cut": [
-        ("TYPE", "Тип (лес / луг / водные / околоводные)", True, ["Type", "TYPE", "Тип", "Расшифровка"]),
+        ("TYPE", TYPE_FIELD_TITLE, True, TYPE_FIELD_CANDS + ["Расшифровка"]),
         ("NAME", "Название экосистемы", False, ["Name", "NAME", "Название", "Ecosystem", "Расшифровка"]),
         ("OOZT", "ООЗТ (если поля нет — из квартальной сети)", False, ["OOZT", "ООЗТ", "Name_OOZT"]),
         ("ID", "Исходный ID экосистемы (по желанию)", False, ["ID", "Id", "id", "eco_id", "ECO_ID", "uid",
                                                               "FID_ecosys", "fid_1"]),
-        (STRUCT_FIELD, STRUCT_FIELD_TITLE, False, STRUCT_FIELD_CANDS),
     ],
 }
 
@@ -1659,8 +1780,11 @@ class SetupWindow:
                 pass
         self.root = tk.Tk()
         self.root.title("ООЗТ: природоохранные мероприятия — исходные данные")
-        self.root.geometry("1480x900")
-        self.root.minsize(1180, 700)
+        # окно не больше экрана: кнопки внизу всегда видны (правка 13)
+        sw, sh = self.root.winfo_screenwidth(), self.root.winfo_screenheight()
+        w_, h_ = min(1480, int(sw * 0.95)), min(900, int(sh * 0.90))
+        self.root.geometry(f"{w_}x{h_}+{max(0, (sw - w_) // 2)}+{max(0, (sh - h_) // 3)}")
+        self.root.minsize(min(900, w_), min(560, h_))
         self.cfg = cfg or Config()
         self.result: Config | None = None
         self.measures: list[dict] = []
@@ -1701,6 +1825,17 @@ class SetupWindow:
             "Обязательны таблица мероприятий и слой территории. Остальные слои необязательны: справа видно, "
             "какие мероприятия будут рассчитаны при выбранном наборе данных и чего не хватает остальным.")
         ).pack(anchor="w")
+
+        # ---- кнопки: упаковываются до панелей, поэтому не уходят за край окна при любой высоте
+        bot = ttk.Frame(self.root, padding=(12, 6, 12, 10))
+        bot.pack(side="bottom", fill="x")
+        ttk.Separator(self.root, orient="horizontal").pack(side="bottom", fill="x")
+        ttk.Button(bot, text="Загрузить конфигурацию…", command=self._load_cfg_file).pack(side="left")
+        ttk.Button(bot, text="Сохранить конфигурацию…", command=self._save_cfg_file).pack(side="left", padx=6)
+        ttk.Button(bot, text="Сбросить к умолчаниям", command=self._reset_cfg).pack(side="left")
+        ttk.Button(bot, text="Отмена", command=self._cancel).pack(side="right")
+        ttk.Button(bot, text="Запустить расчёт", command=self._run).pack(side="right", padx=6)
+        self.root.protocol("WM_DELETE_WINDOW", self._cancel)
 
         pw = ttk.PanedWindow(self.root, orient="horizontal")
         pw.pack(fill="both", expand=True, padx=12, pady=6)
@@ -1841,14 +1976,14 @@ class SetupWindow:
         s3.pack(fill="x", pady=(0, 8))
         ttk.Label(s3, foreground=self.C_MUTED, font=self.f_small, wraplength=700, justify="left",
                   text="✔ — слой выбран;  ! — нужен включённым мероприятиям, но не выбран;  ○ — не используется "
-                       "включёнными мероприятиями. Коды мероприятий — по таблице (колонка с номерами I.1, II.1…).",
+                       "включёнными мероприятиями. Коды мероприятий — по таблице (колонка с номерами CAPEX-1-1, OPEX-4-1…).",
                   ).pack(anchor="w", pady=(0, 4))
         for spec in LAYER_SPECS:
             self._layer_row(s3, spec)
-        # стихийные тропы: скачать из OSM / свой слой / не использовать
+        # грунтовые дороги и тропы: скачать из OSM / свой слой / не использовать
         fi = ttk.Frame(s3)
         fi.pack(fill="x", pady=(6, 0))
-        ttk.Label(fi, text="Стихийные тропы (для мероприятий со столбцом «Только стихийные тропы» = да):",
+        ttk.Label(fi, text="Грунтовые дороги и тропы (для мероприятий со столбцом «Только грунтовые дороги и тропы» = да):",
                   wraplength=600, justify="left").grid(row=0, column=0, columnspan=2, sticky="w")
         self.v_inf_mode = tk.StringVar(value="auto")
         self._inf_files: list[str] = []
@@ -1856,11 +1991,10 @@ class SetupWindow:
         f_osm.grid(row=1, column=0, columnspan=2, sticky="w")
         ttk.Radiobutton(f_osm, text="из OSM:", value="auto",
                         variable=self.v_inf_mode, command=self._inf_changed).pack(side="left")
-        self.v_osm_inf = tk.BooleanVar(value=True)
-        self.v_osm_unp = tk.BooleanVar(value=False)
-        ttk.Checkbutton(f_osm, text="стихийные", variable=self.v_osm_inf,
+        self.v_osm_set = tk.StringVar(value="unpaved")
+        ttk.Radiobutton(f_osm, text="грунтовые все", value="unpaved", variable=self.v_osm_set,
                         command=self._inf_changed).pack(side="left", padx=(8, 0))
-        ttk.Checkbutton(f_osm, text="грунтовые", variable=self.v_osm_unp,
+        ttk.Radiobutton(f_osm, text="грунтовые неорганизованные", value="unpaved_inf", variable=self.v_osm_set,
                         command=self._inf_changed).pack(side="left", padx=(8, 0))
         f_src = ttk.Frame(fi)
         f_src.grid(row=2, column=0, columnspan=2, sticky="w", padx=(22, 0))
@@ -1884,20 +2018,21 @@ class SetupWindow:
         self.l_inf.grid(row=5, column=0, columnspan=2, sticky="w")
         self._inf_changed()
         self._species_block(s3)
+        self._params_block()
 
         # ---- правая колонка
         right = ttk.Frame(pw, padding=(8, 0, 0, 0))
         pw.add(right, weight=4)
         self._pw = pw
         self.root.bind("<Map>", self._place_sash, add="+")
-        s4 = ttk.LabelFrame(right, text=" 4. Что будет рассчитано ", padding=8)
+        s4 = ttk.LabelFrame(right, text=" 5. Что будет рассчитано ", padding=8)
         s4.pack(fill="both", expand=True)
         self.l_sum = ttk.Label(s4, font=self.f_bold, text="Выберите таблицу мероприятий")
         self.l_sum.pack(anchor="w", pady=(0, 6))
         tf = ttk.Frame(s4); tf.pack(fill="both", expand=True)
         cols = ("code", "name", "status")
         self.tree = ttk.Treeview(tf, columns=cols, show="headings", selectmode="browse")
-        for c, t, w, st in (("code", "Код", 60, False), ("name", "Мероприятие", 300, True),
+        for c, t, w, st in (("code", "Код", 92, False), ("name", "Мероприятие", 300, True),
                             ("status", "Статус при выбранных данных", 300, True)):
             self.tree.heading(c, text=t, anchor="w")
             self.tree.column(c, width=w, stretch=st, anchor="w")
@@ -1921,8 +2056,8 @@ class SetupWindow:
                                   "полное описание расчёта и нужные слои.")
         self.detail.configure(state="disabled")
 
-        s5 = ttk.LabelFrame(right, text=" 5. Результаты ", padding=8)
-        s5.pack(fill="x", pady=(8, 0))
+        s5 = ttk.LabelFrame(right, text=" 6. Результаты ", padding=8)
+        s5.pack(side="bottom", fill="x", pady=(8, 0), before=s4)   # не сжимается списком мероприятий
         self.v_out = tk.StringVar()
         r = ttk.Frame(s5); r.pack(fill="x")
         ttk.Label(r, text="Папка:", width=8).pack(side="left")
@@ -1956,14 +2091,92 @@ class SetupWindow:
                        "иначе через LibreOffice; без них PDF собирается встроенной вёрсткой, DOC — не создаётся."
                   ).pack(anchor="w", pady=(2, 0))
 
-        # ---- кнопки
-        bot = ttk.Frame(self.root, padding=(12, 4, 12, 12))
-        bot.pack(fill="x")
-        ttk.Button(bot, text="Загрузить конфигурацию…", command=self._load_cfg_file).pack(side="left")
-        ttk.Button(bot, text="Сохранить конфигурацию…", command=self._save_cfg_file).pack(side="left", padx=6)
-        ttk.Button(bot, text="Отмена", command=self._cancel).pack(side="right")
-        ttk.Button(bot, text="Запустить расчёт", command=self._run).pack(side="right", padx=6)
-        self.root.protocol("WM_DELETE_WINDOW", self._cancel)
+
+    def _params_block(self):
+        """Раздел 4 «Параметры мероприятий»: пороги, которые задаются в окне (а не в таблице мероприятий)."""
+        tk, ttk = self.tk, self.ttk
+        s = ttk.LabelFrame(self.left, text=" 4. Параметры мероприятий ", padding=8)
+        s.pack(fill="x", pady=(0, 8))
+        upd = lambda *_: self._refresh()                                  # noqa: E731
+        def ent(parent, var, w=6):
+            e = ttk.Entry(parent, textvariable=var, width=w)
+            e.pack(side="left", padx=4)
+            e.bind("<FocusOut>", upd)
+            e.bind("<Return>", upd)
+            return e
+        small = dict(foreground=self.C_MUTED, font=self.f_small, wraplength=640, justify="left")
+        # CAPEX-2-1
+        ttk.Label(s, text="CAPEX-2-1 — плотность троп в окне 250 × 250 м; порог плотности:",
+                  font=self.f_bold).pack(anchor="w")
+        self.v_i3_mode = tk.StringVar(value="quantile")
+        self.v_i3_q = tk.StringVar(value="0,90")
+        self.v_i3_val = tk.StringVar(value="250")
+        r = ttk.Frame(s); r.pack(fill="x", padx=(12, 0))
+        ttk.Radiobutton(r, text="квантиль", value="quantile", variable=self.v_i3_mode, command=upd).pack(side="left")
+        ent(r, self.v_i3_q, 5)
+        ttk.Label(r, text="(по ячейкам каждой ООЗТ)").pack(side="left", padx=(0, 14))
+        ttk.Radiobutton(r, text="значение", value="value", variable=self.v_i3_mode, command=upd).pack(side="left")
+        ent(r, self.v_i3_val, 6)
+        ttk.Label(r, text="м/га").pack(side="left")
+        # CAPEX-3-1 / 3-2
+        r = ttk.Frame(s); r.pack(fill="x", pady=(8, 0))
+        ttk.Label(r, text="CAPEX-3-1, 3-2 — грунтовые дороги и тропы в выделе: плотность не менее",
+                  font=self.f_bold).pack(side="left")
+        self.v_rare_thr = tk.StringVar(value="100")
+        ent(r, self.v_rare_thr, 6)
+        ttk.Label(r, text="м/га").pack(side="left")
+        # CAPEX-1-1 / 1-2
+        ttk.Label(s, text="CAPEX-1-1 — Регулируемое мозаичное выкашивание 1 очереди (небольших выделов)",
+                  font=self.f_bold).pack(anchor="w", pady=(8, 0))
+        r = ttk.Frame(s); r.pack(fill="x", padx=(12, 0))
+        self.v_mow_lo, self.v_mow_hi = tk.StringVar(value="1"), tk.StringVar(value="5")
+        ttk.Label(r, text="площадью от").pack(side="left")
+        ent(r, self.v_mow_lo, 5)
+        ttk.Label(r, text="до").pack(side="left")
+        ent(r, self.v_mow_hi, 5)
+        ttk.Label(r, text="га включительно").pack(side="left")
+        ttk.Label(s, text="CAPEX-1-2 «Регулируемое мозаичное выкашивание 2 очереди (крупных участков)» формируется "
+                          "автоматически для выделов крупнее верхней границы. Пустое «от» — без нижней границы; "
+                          "пустое «до» — 1 очередь без верхней границы, 2 очередь не формируется.",
+                  **small).pack(anchor="w", padx=(12, 0))
+        # CAPEX-2-4
+        r = ttk.Frame(s); r.pack(fill="x", pady=(8, 0))
+        ttk.Label(r, text="CAPEX-2-4 — Колокольчик: участки крупнее", font=self.f_bold).pack(side="left")
+        self.v_reintro = tk.StringVar(value="2")
+        ent(r, self.v_reintro, 5)
+        ttk.Label(r, text="га").pack(side="left")
+
+    def _params_to_cfg(self, c: Config):
+        if not hasattr(self, "v_reintro"):
+            return
+        def num(var, default, none_ok=False):
+            t = str(var.get()).strip().replace(",", ".")
+            if not t:
+                return None if none_ok else default
+            try:
+                return max(0.0, float(t))
+            except ValueError:
+                return default
+        c.i3_thr_mode = "value" if self.v_i3_mode.get() == "value" else "quantile"
+        q = num(self.v_i3_q, 0.90)
+        c.i3_quantile = min(q / 100 if q > 1 else q, 1.0)
+        c.i3_value_m_ha = num(self.v_i3_val, 250.0)
+        c.rare_trail_m_ha = num(self.v_rare_thr, 100.0)
+        c.mow_q1_min_ha = num(self.v_mow_lo, 1.0, none_ok=True)
+        c.mow_q1_max_ha = num(self.v_mow_hi, 5.0, none_ok=True)
+        c.reintro_min_ha = num(self.v_reintro, 2.0)
+
+    def _params_from_cfg(self, c: Config):
+        d = Config()
+        g = lambda k: getattr(c, k, getattr(d, k))                          # noqa: E731
+        f = lambda x: "" if x is None else f"{float(x):g}".replace(".", ",")  # noqa: E731
+        self.v_i3_mode.set("value" if g("i3_thr_mode") == "value" else "quantile")
+        self.v_i3_q.set(f"{float(g('i3_quantile')):.2f}".replace(".", ","))
+        self.v_i3_val.set(f(g("i3_value_m_ha")))
+        self.v_rare_thr.set(f(g("rare_trail_m_ha")))
+        self.v_mow_lo.set(f(g("mow_q1_min_ha")))
+        self.v_mow_hi.set(f(g("mow_q1_max_ha")))
+        self.v_reintro.set(f(g("reintro_min_ha")))
 
     def _place_sash(self, _e=None):
         if getattr(self, "_sash_done", False):
@@ -2204,7 +2417,7 @@ class SetupWindow:
         self._refresh()
         messagebox.showinfo("Таблица мероприятий", info, parent=self.root)
 
-    # ------------------------------------------------------------------ стихийные тропы
+    # ------------------------------------------------------------------ грунтовые дороги и тропы
     def _inf_changed(self):
         m = self.v_inf_mode.get()
         if m == "files" and not self._inf_files:
@@ -2212,11 +2425,8 @@ class SetupWindow:
         elif m == "files":
             txt = "свой слой: " + "; ".join(Path(x).name for x in self._inf_files)
         elif m == "auto":
-            parts = []
-            if self.v_osm_inf.get():
-                parts.append("стихийные (informal=yes)")
-            if self.v_osm_unp.get():
-                parts.append(f"грунтовые (highway={OSM_UNPAVED_HIGHWAY} и surface={OSM_UNPAVED_SURFACE})")
+            parts = [f"{OSM_TRAIL_KIND_TITLE[self.v_osm_set.get()]} (highway={OSM_UNPAVED_HIGHWAY} и "
+                     f"surface={OSM_SURFACES[self.v_osm_set.get()]}) и informal=yes"]
             src = self._osm_src_keys.get(self.v_osm_src.get(), "auto")
             if src == "pbf":
                 where = ("файл " + Path(self._osm_pbf).name) if self._osm_pbf else \
@@ -2228,10 +2438,10 @@ class SetupWindow:
                 where = "Overpass API, нужен интернет"
             else:
                 where = OSM_SOURCES[src][0] + " — скачивается один раз в папку osm_cache рядом со скриптом"
-            txt = ("тропы OSM в границах территории: " + "; ".join(parts) + ". Источник: " + where) if parts else \
-                "отметьте, какие тропы брать из OSM: стихийные и/или грунтовые"
+            txt = "грунтовые дороги и тропы OSM в границах территории: " + "; ".join(parts) + ". Источник: " + where
         else:
-            txt = "стихийные тропы не используются — мероприятия с «Только стихийные тропы» = да не назначаются"
+            txt = ("грунтовые дороги и тропы не используются — мероприятия с «Только грунтовые дороги и тропы» = да "
+                   "не назначаются")
         self.l_inf.configure(text=txt)
 
     def _pick_osm_pbf(self):
@@ -2246,7 +2456,7 @@ class SetupWindow:
             self._inf_changed()
 
     def _pick_informal(self):
-        ps = self._ask("vec", True, "Стихийные тропы — линейный слой (можно несколько файлов)")
+        ps = self._ask("vec", True, "Грунтовые дороги и тропы — линейный слой (можно несколько файлов)")
         if ps:
             self._inf_files = ps
             self.v_inf_mode.set("files")
@@ -2318,7 +2528,7 @@ class SetupWindow:
             self.l_xlsx.configure(foreground=self.C_WARN, text=f"! таблица не прочитана: {e}")
 
     def _setup_layer_combo(self):
-        self.v_oozt.set(self.cfg.oozt_path)
+        self.v_oozt.set(self.cfg.oozt_path or "")
         p = self.cfg.oozt_path or ""
         if p.lower().endswith(".gpkg") and Path(p).exists():
             layers = [l[0] for l in pyogrio.list_layers(p)]
@@ -2393,7 +2603,9 @@ class SetupWindow:
         for i, (key, label, req, cands) in enumerate(FIELD_SPECS[mode], start=1):
             v = self.tk.StringVar()
             values = cols if req else [NONE_FIELD] + cols
-            cur = (self.cfg.fields or {}).get(key) or prev.get(key)
+            ff = self.cfg.fields or {}
+            # прежние конфигурации: отдельное поле структурного класса (STRUCT) → поле «Структурный класс»
+            cur = (ff.get(STRUCT_FIELD) if key == "TYPE" else None) or ff.get(key) or prev.get(key)
             if cur not in cols and guess:
                 cur = next((c for c in cands if c in cols), None) or next(
                     (c for c in cols if c.lower() in [x.lower() for x in cands]), None)
@@ -2445,8 +2657,7 @@ class SetupWindow:
         _im = self.v_inf_mode.get()
         c.informal_trails = (["auto"] if _im == "auto" else
                              list(self._inf_files) if _im == "files" else [])
-        c.osm_trail_kinds = [k for k, v in (("informal", self.v_osm_inf), ("unpaved", self.v_osm_unp))
-                             if v.get()] or ["informal"]
+        c.osm_trail_kinds = ["informal", self.v_osm_set.get()]
         c.osm_source = self._osm_src_keys.get(self.v_osm_src.get(), "auto")
         c.osm_pbf = self._osm_pbf or ""
         try:
@@ -2454,6 +2665,8 @@ class SetupWindow:
         except ValueError:
             c.min_share_pct = 25.0
         c.report_formats = [k for k, v in self.v_formats.items() if v.get()]
+        self._params_to_cfg(c)
+        globals()["_CUR_CFG"] = c          # описания в окне — с текущими параметрами раздела 4
         return c
 
     def _refresh(self):
@@ -2471,7 +2684,7 @@ class SetupWindow:
             parts, unk = [], []
             for t, n in vc.items():
                 (parts if any(k in t.lower() for k in known) else unk).append(f"{t} — {n}")
-            sf = cfg.fields.get(STRUCT_FIELD)
+            sf = cfg.fields.get(STRUCT_FIELD) or tf
             s_note = ""
             if not sf or sf not in self.attr_df.columns or struct_known_share(self.attr_df[sf]) < 0.05:
                 # как при расчёте: стандартное поле структурного класса или коды class_value
@@ -2480,7 +2693,7 @@ class SetupWindow:
                 if sf and sf in self.attr_df.columns:
                     s_note = (f". ! В поле «{sf}» нет структурных классов экосистем (луга, леса…) — " +
                               (f"при расчёте будет взято поле «{alt}»" if alt else
-                               "выберите поле структурного класса, иначе I.7 не назначится"))
+                               "выберите поле структурного класса, иначе мозаичное выкашивание не назначится"))
                 sf = alt or sf
             n_rec = sum(n for t, n in vc.items() if type_recognized(t))
             s_ok = (sf in self.attr_df.columns and struct_known_share(self.attr_df[sf]) >= 0.5)
@@ -2500,7 +2713,7 @@ class SetupWindow:
             idf = cfg.fields.get("ID")
             if cfg.unit_mode == "eco" and idf in self.attr_df.columns:
                 dup = int(self.attr_df[idf].duplicated().sum())
-                txt += (f". ID уникальны." if dup == 0 else f". ! В поле ID {dup} повторов — ID должен быть уникальным.")
+                txt += (". ID уникальны." if dup == 0 else f". ! В поле ID {dup} повторов — ID должен быть уникальным.")
             self.l_types.configure(foreground=self.C_WARN if (not parts or "!" in txt) else self.C_MUTED, text=txt)
         elif self.attr_df is not None:
             self.l_types.configure(foreground=self.C_WARN, text="! выберите поле типа полигона")
@@ -2594,6 +2807,7 @@ class SetupWindow:
     # ------------------------------------------------------------------ конфигурация
     def _load_from_cfg(self, cfg: Config):
         self.cfg = cfg
+        self._params_from_cfg(cfg)          # до любых _refresh/_collect, иначе параметры затрутся полями окна
         self.v_mode.set(cfg.unit_mode if cfg.unit_mode in UNIT_MODES else "kv_vyd")
         self.v_oozt_name.set(cfg.oozt_name or "")
         self.v_group.set(cfg.report_group_field or NONE_FIELD)
@@ -2605,9 +2819,8 @@ class SetupWindow:
         _inf = [str(x).strip() for x in (cfg.informal_trails or []) if str(x).strip()]
         self._inf_files = [x for x in _inf if x.lower() not in ("auto", "авто", "osm")]
         self.v_inf_mode.set("files" if self._inf_files else "auto" if _inf else "none")
-        _k = getattr(cfg, "osm_trail_kinds", None) or ["informal"]
-        self.v_osm_inf.set("informal" in _k)
-        self.v_osm_unp.set("unpaved" in _k)
+        _k = getattr(cfg, "osm_trail_kinds", None) or ["informal", "unpaved"]
+        self.v_osm_set.set("unpaved_inf" if "unpaved_inf" in _k else "unpaved")
         _src = str(getattr(cfg, "osm_source", "auto") or "auto").lower()
         self.v_osm_src.set(OSM_SOURCES.get(_src, OSM_SOURCES["auto"])[0])
         self._osm_pbf = str(getattr(cfg, "osm_pbf", "") or "")
@@ -2619,7 +2832,12 @@ class SetupWindow:
         self._sp_render()
         if cfg.measures_xlsx:
             self._read_measures()
+        else:
+            self.measures = []
+            self.v_xlsx.set("")
+            self.l_xlsx.configure(foreground=self.C_MUTED, text="таблица мероприятий не выбрана")
         self._setup_layer_combo()
+        self.columns, self.attr_df = [], None
         if cfg.oozt_path and Path(cfg.oozt_path).exists():
             try:
                 self.columns, self.attr_df = _vector_fields(cfg.oozt_path, self.v_layer.get() or None)
@@ -2702,9 +2920,25 @@ class SetupWindow:
                 ("\n…" if len(miss) > 15 else "") + "\n\nЗапустить расчёт без них?", parent=self.root):
             return
         self.result = self._collect()
+        self._autosave(self.result)
         self.root.destroy()
 
+    def _autosave(self, c: Config | None = None):
+        """Последняя конфигурация окна сохраняется рядом со скриптом и подставляется при следующем запуске."""
+        try:
+            (c or self._collect()).save(LAST_CFG_PATH)
+        except Exception as e:
+            log.debug("Не удалось сохранить %s: %s", LAST_CFG_PATH, e)
+
+    def _reset_cfg(self):
+        from tkinter import messagebox
+        if messagebox.askyesno("Сбросить к умолчаниям", "Очистить все поля окна и вернуть параметры по умолчанию?",
+                               parent=self.root):
+            self._inf_files, self._osm_pbf = [], ""
+            self._load_from_cfg(Config())
+
     def _cancel(self):
+        self._autosave()
         self.result = None
         self.root.destroy()
 
@@ -2714,13 +2948,18 @@ class SetupWindow:
 
 
 def _code_key(code: str):
-    """Сортировка кодов вида «III.5»: римская часть, затем номер."""
-    rom = {"I": 1, "II": 2, "III": 3, "IV": 4, "V": 5, "VI": 6}
-    mt = re.match(r"^([IVX]+)\.(\d+)", str(code))
-    return (rom.get(mt.group(1), 99), int(mt.group(2))) if mt else (99, 0)
+    """Сортировка кодов «CAPEX-1-1» … «OPEX-5-9»: группа, затем номер (старые коды — через синонимы)."""
+    mt = _NEW_CODE_RE.match(canon_code(code))
+    return (int(mt.group(2)), int(mt.group(3))) if mt else (99, 0)
 
 
 def gui_collect_config(cfg: Config | None = None) -> Config:
+    if cfg is None and LAST_CFG_PATH.exists():
+        # окно предзаполняется последней конфигурацией (oozt_recs_last.json рядом со скриптом)
+        try:
+            cfg = Config.load(LAST_CFG_PATH)
+        except Exception as e:
+            log.warning("Не удалось прочитать %s: %s — окно открыто с параметрами по умолчанию", LAST_CFG_PATH, e)
     res = SetupWindow(cfg).show()
     if res is None:
         print("Отменено пользователем")
@@ -3131,12 +3370,14 @@ def _part_ids(ids: pd.Series, g: gpd.GeoDataFrame) -> pd.Series:
 
 
 # =====================================================================================
-#        СПРАВОЧНИКИ: КРАСНАЯ КНИГА МОСКВЫ, ИНВАЗИВНЫЕ ВИДЫ, СТИХИЙНЫЕ ТРОПЫ OSM
+#        СПРАВОЧНИКИ: КРАСНАЯ КНИГА МОСКВЫ, ИНВАЗИВНЫЕ ВИДЫ, ГРУНТОВЫЕ ДОРОГИ И ТРОПЫ OSM
 # =====================================================================================
 try:
     _REF_DIR = Path(__file__).resolve().parent / "refdata"
 except NameError:                        # Jupyter: __file__ не определён
     _REF_DIR = Path.cwd() / "refdata"
+# последняя конфигурация окна (автосохранение при запуске расчёта и при закрытии окна)
+LAST_CFG_PATH = _REF_DIR.parent / "oozt_recs_last.json"
 _REF_CACHE: dict = {}
 REFDATA_URL = "https://raw.githubusercontent.com/ikotlov-ux/oozt-recs/main/refdata/"
 _REF_FETCHED: dict = {}
@@ -3146,7 +3387,7 @@ def _refdata_file(name: str) -> Path:
     """Файл справочника из папки refdata/ рядом со скриптом. Если папки или файла нет (скопирован только
     oozt_recs.py), файл один раз скачивается из репозитория скрипта в refdata/ (или во временную папку,
     если рядом со скриптом нельзя писать). Без справочника kk_moscow.csv категории Красной книги не
-    определяются и правила по КК (III.3, III.4) ничего не находят."""
+    определяются и правила по КК (CAPEX-3-1, CAPEX-3-2) ничего не находят."""
     p = _REF_DIR / name
     if p.exists():
         return p
@@ -3220,12 +3461,13 @@ def kk_ref() -> dict:
     """Красная книга Москвы, 3-е издание (ПП Москвы № 745-ПП от 02.07.2019, Приложение 2):
     латинское название → категория (0–5 или «О») и русское название."""
     ref = _load_ref("kk_moscow.csv", ["cat", "ru"])
-    for v in ref.values():                     # категория: int, «О» или NaN
+    for v in ref.values():                     # категория: int, «О» или «б/к» (вид в книге без категории)
         c = v["cat"]
         try:
             v["cat"] = int(float(c))
         except (TypeError, ValueError):
-            v["cat"] = str(c).strip() if str(c).strip() else np.nan
+            t = "" if c is None or (isinstance(c, float) and np.isnan(c)) else str(c).strip()
+            v["cat"] = t if t and t.lower() != "nan" else "б/к"
     return ref
 
 
@@ -3306,7 +3548,8 @@ def _lookup_latin(species, ref: dict):
 
 
 def kk_category(species):
-    """Категория Красной книги Москвы для вида: 0–5, «О» или NaN (вида нет в КК). Синонимы равноправны."""
+    """Категория Красной книги Москвы для вида: 0–5, «О», «б/к» (без категории) или NaN (вида нет в КК).
+    Синонимы равноправны."""
     r, _ = _lookup_latin(species, kk_ref())
     return np.nan if r is None else r["cat"]
 
@@ -3385,7 +3628,7 @@ def flowering_ref() -> dict:
     res = {"months": {}, "pairs": [], "kk": {}, "path": None}
     _REF_CACHE[ck] = res
     if p is None:
-        log.warning("Справочник цветения не найден — сроки III.4 по цветению и синонимы из него недоступны")
+        log.warning("Справочник цветения не найден — сроки CAPEX-3-2 по цветению и синонимы из него недоступны")
         return res
     try:
         import openpyxl
@@ -3459,7 +3702,7 @@ def _wr_mark(v) -> bool:
 def read_water_ref(path) -> pd.DataFrame:
     """Справочник водоёмов и болот ООЗТ → таблица объектов с отметками мероприятий.
     Читаются листы «Битца и Измайлово» и «Все ООЗТ Москвы» («Сводка» — нет); заголовок — строка с «№ п/п»;
-    столбцы — по началу названия (без учёта регистра и ё/е), мероприятия — по коду в заголовке («I.9 …»).
+    столбцы — по началу названия (без учёта регистра и ё/е), мероприятия — по коду в заголовке («CAPEX-1-5 …»; прежние «I.9 …» — синонимы).
     Строки «ИТОГО» и без координат пропускаются; дубли (ООЗТ + квартал + название) объединяются по ИЛИ."""
     import openpyxl
     key = ("_wref", str(path), os.path.getmtime(path) if os.path.exists(path) else 0)
@@ -3491,9 +3734,9 @@ def read_water_ref(path) -> pd.DataFrame:
                  note=col("примечание"))
         mcols = {}
         for i, h in enumerate(rows[h_i]):
-            m = re.match(r"^\s*([IVX]+\.\d+)\b", str(h or ""))
+            m = re.match(rf"^\s*({CODE_RE_TXT})(?![\w.-])", str(h or ""), re.I)
             if m:
-                mcols[m.group(1)] = i
+                mcols[canon_code(m.group(1))] = i
         for ri, r in enumerate(rows[h_i + 1:], start=h_i + 2):
             g = lambda k: _wr_val(r[c[k]]) if c.get(k) is not None and c[k] < len(r) else None
             if any("итого" in _norm_txt(x) for x in r[:max(c["n"], c["name"] or 0) + 1] if x is not None):
@@ -3546,7 +3789,7 @@ def water_ref_marked(code: str) -> pd.DataFrame | None:
     except Exception as e:
         log.error("Справочник водоёмов %s не прочитан: %s", p.name, e)
         return None
-    col = f"m:{code}"
+    col = f"m:{canon_code(code)}"
     if df.empty or col not in df.columns:
         return df.iloc[0:0] if not df.empty else df
     return df[df[col]]
@@ -3556,6 +3799,26 @@ def invasive_ref() -> dict:
     """Инвазивные виды Москвы (перечень к ПП Москвы № 369-ПП от 03.03.2026):
     латинское название → группа (I–IV), жизненная форма, русское название."""
     return _load_ref("invasive_moscow.csv", ["group", "life_form", "ru"])
+
+
+INVASIVE_REF_TAXON = "@invasive_ref"      # «Виды: таксоны» = «по справочнику»: все инвазивные виды справочника
+INVASIVE_REF_EXCLUDE = ("heracleum sosnowskyi",)   # … кроме борщевика (отдельное мероприятие CAPEX-2-2)
+
+
+def invasive_group(species):
+    """Группа инвазивности (I–IV) вида по справочнику invasive_moscow.csv (с синонимами) или None."""
+    r, _ = _lookup_latin(species, invasive_ref())
+    return None if r is None else str(r.get("group") or "").strip() or None
+
+
+def species_display(species) -> str:
+    """Название вида для оснований: инвазивный вид — с русским названием и группой по справочнику."""
+    r, _ = _lookup_latin(species, invasive_ref())
+    if r is None:
+        return str(species)
+    ru, grp = str(r.get("ru") or "").strip(), str(r.get("group") or "").strip()
+    extra = ", ".join(x for x in (ru, f"группа {grp}" if grp else "") if x)
+    return f"{species} ({extra})" if extra else str(species)
 
 
 OVERPASS_ENDPOINTS = [
@@ -3568,7 +3831,6 @@ OVERPASS_ENDPOINTS = [
 
 # ---- лесопатология: ПВН → точки с категорией рекомендации ------------------------------
 # 6 категорий по тексту рекомендаций (порядок важен: «эталон»/«надзор» проверяются раньше рубок)
-LESOPAT_CATEGORIES = ["санитарная рубка", "рубки ухода", "надзор", "посадка", "эталон", "биотехния"]
 LESOPAT_CAT_RE = [
     ("эталон", r"эталон|ппп\b"),
     ("биотехния", r"синичник"),
@@ -3834,28 +4096,41 @@ def read_lesopat(path: str, quiet: bool = False, return_all: bool = False):
 
 
 OSM_UNPAVED_HIGHWAY = "path|footway|track|bridleway"
-OSM_UNPAVED_SURFACE = "ground|dirt|earth|grass|mud|sand|unpaved"
-OSM_TRAIL_KIND_TITLE = {"informal": "стихийные", "unpaved": "грунтовые"}
+OSM_SURFACES = {     # набор покрытий surface для грунтовых дорог и троп
+    "unpaved": "ground|dirt|earth|grass|mud|unpaved",       # грунтовые все
+    "unpaved_inf": "dirt|unpaved|grass|mud",                # грунтовые неорганизованные
+}
+OSM_TRAIL_KIND_TITLE = {"informal": "informal=yes", "unpaved": "грунтовые все",
+                        "unpaved_inf": "грунтовые неорганизованные"}
 
 
-def osm_trails_query(bbox_wgs84, kinds=("informal",)) -> str:
-    """Запрос Overpass: стихийные (informal=yes) и/или грунтовые тропы (highway=path|footway|track|
-    bridleway с surface=ground|dirt|earth|grass|mud|sand|unpaved)."""
+def _osm_surface(kinds) -> str | None:
+    """Набор surface для выбранного варианта грунтовых дорог и троп (None — грунтовые не берутся)."""
+    k = kinds or ()
+    return OSM_SURFACES["unpaved_inf"] if "unpaved_inf" in k else OSM_SURFACES["unpaved"] if "unpaved" in k else None
+
+
+def osm_trails_query(bbox_wgs84, kinds=("informal", "unpaved")) -> str:
+    """Запрос Overpass: informal=yes и/или грунтовые дороги и тропы (highway=path|footway|track|bridleway
+    с surface из выбранного набора OSM_SURFACES)."""
     w, s, e, n = [float(x) for x in bbox_wgs84]          # total_bounds: (minx, miny, maxx, maxy)
     bb = f"({s:.6f},{w:.6f},{n:.6f},{e:.6f})"
     parts = []
     if "informal" in kinds:
         parts.append(f'way["informal"="yes"]{bb};')
-    if "unpaved" in kinds:
-        parts.append(f'way["highway"~"^({OSM_UNPAVED_HIGHWAY})$"]["surface"~"^({OSM_UNPAVED_SURFACE})$"]{bb};')
+    surf = _osm_surface(kinds)
+    if surf:
+        parts.append(f'way["highway"~"^({OSM_UNPAVED_HIGHWAY})$"]["surface"~"^({surf})$"]{bb};')
     return "[out:json][timeout:90];(" + "".join(parts) + ");out geom;"
 
 
-def _osm_trail_kind(tags: dict) -> str:
+def _osm_trail_kind(tags: dict, kinds=("informal", "unpaved")) -> str:
+    """Вид объекта OSM для выбранных kinds: «стихийная», «грунтовая», обе или «» (не подходит)."""
     t = tags or {}
-    inf = str(t.get("informal", "")).lower() == "yes"
-    unp = (re.fullmatch(OSM_UNPAVED_HIGHWAY, str(t.get("highway", ""))) is not None
-           and re.fullmatch(OSM_UNPAVED_SURFACE, str(t.get("surface", ""))) is not None)
+    inf = "informal" in kinds and str(t.get("informal", "")).lower() == "yes"
+    surf = _osm_surface(kinds)
+    unp = (surf is not None and re.fullmatch(OSM_UNPAVED_HIGHWAY, str(t.get("highway", ""))) is not None
+           and re.fullmatch(surf, str(t.get("surface", ""))) is not None)
     return "стихийная, грунтовая" if inf and unp else "стихийная" if inf else "грунтовая" if unp else ""
 
 
@@ -3897,7 +4172,7 @@ def _osm_trails_overpass(bbox_wgs84, kinds):
             tg = el.get("tags") or {}
             lines.append(LineString(coords))
             ids.append(el.get("id"))
-            kd.append(_osm_trail_kind(tg))
+            kd.append(_osm_trail_kind(tg, kinds))
             hw.append(tg.get("highway", ""))
             sf.append(tg.get("surface", ""))
     return gpd.GeoDataFrame({"osm_id": ids, "kind": kd, "highway": hw, "surface": sf},
@@ -3935,9 +4210,8 @@ def _osm_trails_pbf(path, bbox_wgs84, kinds):
         for c in ("highway", "surface", "informal"):
             if c in df.columns and isinstance(df.at[idx, c], str) and df.at[idx, c]:
                 tg[c] = df.at[idx, c]
-        k = _osm_trail_kind(tg)
-        ok = ("informal" in kinds and "стихийная" in k) or ("unpaved" in kinds and "грунтовая" in k)
-        if ok:
+        k = _osm_trail_kind(tg, kinds)
+        if k:
             rows.append((idx, k, tg.get("highway", ""), tg.get("surface", "")))
     sel = df.loc[[r[0] for r in rows]]
     g = gpd.GeoDataFrame({"osm_id": sel["osm_id"].values if "osm_id" in sel.columns else range(len(sel)),
@@ -3997,10 +4271,10 @@ def _bbox_inside(bb, ext) -> bool:
 
 def download_informal_trails_osm(bbox_wgs84, out_dir, kinds=("informal",), source="auto", pbf="",
                                  cache_dir="", cache_days=30) -> Path | None:
-    """Тропы OSM → GeoJSON (WGS 84): стихийные (informal=yes) и/или грунтовые.
+    """Грунтовые дороги и тропы OSM → GeoJSON (WGS 84): informal=yes и грунтовые (все или неорганизованные).
     Источник: Overpass API, выгрузка BBBike (Москва), Geofabrik (ЦФО) или свой файл .osm.pbf;
     auto — по очереди Overpass → BBBike → Geofabrik. При неудаче возвращает None — скрипт продолжит без слоя."""
-    kinds = [k for k in (kinds or ["informal"]) if k in OSM_TRAIL_KIND_TITLE] or ["informal"]
+    kinds = [k for k in (kinds or ["informal", "unpaved"]) if k in OSM_TRAIL_KIND_TITLE] or ["informal", "unpaved"]
     source = str(source or "auto").strip().lower()
     if source not in OSM_SOURCES:
         log.warning("Тропы OSM: неизвестный источник «%s» — используется auto", source)
@@ -4043,7 +4317,7 @@ def download_informal_trails_osm(bbox_wgs84, out_dir, kinds=("informal",), sourc
             break
     if g is None:
         log.warning("Тропы OSM не получены ни из одного источника — слой пропущен, "
-                    "правила «только стихийные тропы» используют всю дорожно-тропиночную сеть")
+                    "правила «только грунтовые дороги и тропы» используют всю дорожно-тропиночную сеть")
         return None
     if g.empty:
         log.warning("В OSM нет троп (%s) в границах территории (источник — %s)",
@@ -4079,7 +4353,7 @@ class Data:
         self.bbox_wgs84 = tuple(gpd.GeoSeries([box(*self.bounds_pad)], crs=WORK_EPSG).to_crs(4326).total_bounds)
         self.clip = box(*self.bounds_pad)
         self.trails = self.hydro_lines = self.hydro_polys = None
-        self.trails_informal = None                # стихийные тропы OSM (informal=yes)
+        self.trails_informal = None                # грунтовые дороги и тропы OSM (или свой слой)
         self.sp_points = self.sp_polys = None     # находки видов: species, category, group, layer, kk_cat, __src
         self.sp_rasters: list[dict] = []          # модели SDM: path, category, group, species
         self.dem = None
@@ -4129,8 +4403,8 @@ class Data:
         if getattr(cfg, "split_multipart", True):
             g = _split_multipart(g)
         f = cfg.fields or {}
-        # поле «Структурный класс» (I.7): копия до переименования полей; cfg.fields ниже перезаписывается
-        f_struct = f.get(STRUCT_FIELD)
+        # поле «Структурный класс»: копия до переименования полей; cfg.fields ниже перезаписывается
+        f_struct = f.get(STRUCT_FIELD) or f.get("TYPE")      # одно поле «Структурный класс» (TYPE)
         if f_struct and f_struct not in g.columns:
             log.warning("Поле «Структурный класс» «%s» не найдено в слое территории", f_struct)
             f_struct = None
@@ -4146,7 +4420,7 @@ class Data:
                 f_struct = alt
             else:
                 log.warning("Поле «Структурный класс» «%s» не содержит структурных классов экосистем "
-                            "(значения: %s): мозаичное выкашивание (I.7) не будет назначено", f_struct,
+                            "(значения: %s): мозаичное выкашивание (CAPEX-1-1/1-2) не будет назначено", f_struct,
                             ", ".join(map(str, g[f_struct].dropna().astype(str).unique()[:5])))
         elif not f_struct:
             alt = next((c for c in s_cands if struct_known_share(g[c]) >= 0.5), None)
@@ -4535,7 +4809,7 @@ class Data:
         g = g[g.geom_type.isin(["LineString", "MultiLineString"])].copy()
         return g if not g.empty else None
 
-    # ---- стихийные тропы (OSM informal=yes) ----
+    # ---- грунтовые дороги и тропы (OSM или свой слой) ----
     def _load_informal_trails(self):
         cfg = self.cfg
         paths = [str(x).strip() for x in (cfg.informal_trails or []) if str(x).strip()]
@@ -4546,33 +4820,33 @@ class Data:
         if auto:
             try:
                 p = download_informal_trails_osm(self.bbox_wgs84, cfg.out_dir,
-                                                 getattr(cfg, "osm_trail_kinds", None) or ["informal"],
+                                                 getattr(cfg, "osm_trail_kinds", None) or ["informal", "unpaved"],
                                                  getattr(cfg, "osm_source", "auto"), getattr(cfg, "osm_pbf", ""),
                                                  getattr(cfg, "osm_cache_dir", ""),
                                                  getattr(cfg, "osm_cache_days", 30))
                 if p is not None:
                     files.append(str(p))
             except Exception as e:
-                log.warning("Стихийные тропы: скачивание из OSM не удалось (%s)", e)
+                log.warning("Грунтовые дороги и тропы: скачивание из OSM не удалось (%s)", e)
         if not files:
             if not paths:
-                log.info("Стихийные тропы: не используются (выбрано «не использовать»)")
+                log.info("Грунтовые дороги и тропы: не используются (выбрано «не использовать»)")
             return None
         own = [x for x in files if not Path(x).name.startswith("informal_trails_osm")]
         if own:
-            log.info("Стихийные тропы: свой слой — %s", "; ".join(Path(x).name for x in own))
+            log.info("Грунтовые дороги и тропы: свой слой — %s", "; ".join(Path(x).name for x in own))
         g = read_many(files, self.bbox_wgs84, self.clip)
         if g is None or g.empty:
-            log.warning("Стихийные тропы: в выбранных файлах нет объектов в границах территории")
+            log.warning("Грунтовые дороги и тропы: в выбранных файлах нет объектов в границах территории")
             return None
         g = repair_geometries(g)          # make_valid: защита от TopologyException
         if g is None or g.empty:
             return None
         g = g[g.geom_type.isin(["LineString", "MultiLineString"])].copy()
         if g.empty:
-            log.warning("Стихийные тропы: в выбранных файлах нет линий")
+            log.warning("Грунтовые дороги и тропы: в выбранных файлах нет линий")
             return None
-        log.info("Стихийные тропы: %d сегментов (слой для правил «только стихийные тропы»)", len(g))
+        log.info("Грунтовые дороги и тропы: %d сегментов (слой для правил «только грунтовые дороги и тропы»)", len(g))
         return g
 
     # ---- виды ----
@@ -4584,7 +4858,7 @@ class Data:
             tag = f"{l['category']}, {l['group']}"
             if l["kind"] == "sdm":
                 sp = species_from_filename(str(l["path"]).split("|")[0])
-                rasters.append(dict(l, species=sp, kk_cat=kk_category(sp), layer=i))
+                rasters.append(dict(l, species=sp, kk_cat=kk_category(sp), inv_grp=invasive_group(sp), layer=i))
                 log.info("Слой видов %s (%s): модель SDM, вид «%s»", name, tag, sp)
                 continue
             if l["kind"] not in ("points", "polygons"):
@@ -4604,6 +4878,7 @@ class Data:
             col = l["field"] if l.get("field") in g.columns else detect_species_column(g)
             g["species"] = g[col].astype(str).str.strip() if col else g["__src"]
             g["kk_cat"] = g["species"].map(kk_category)      # категория Красной книги Москвы
+            g["inv_grp"] = g["species"].map(invasive_group)  # группа инвазивности по справочнику (I–IV)
             n_syn = int(g["species"].map(kk_via_synonym).sum())
             if n_syn:
                 log.info("Слой видов %s: %d находок распознаны в Красной книге через синоним (%s)", name, n_syn,
@@ -4621,7 +4896,7 @@ class Data:
                          ", ".join(f"{s} (кат. {c})" for s, c in kk_sp.head(8).items())
                          + ("…" if len(kk_sp) > 8 else ""))
             (pts if l["kind"] == "points" else polys).append(
-                g[["species", "category", "group", "layer", "kk_cat", "__src", "geometry"]])
+                g[["species", "category", "group", "layer", "kk_cat", "inv_grp", "__src", "geometry"]])
         cat = lambda parts: gpd.GeoDataFrame(pd.concat(parts, ignore_index=True), crs=WORK_EPSG) if parts else None
         return cat(pts), cat(polys), rasters
 
@@ -4741,36 +5016,18 @@ def _compact_quarter_basis(bases: list[str]) -> str:
         return "; ".join(uniq)
     # «Колокольчик»: агрегируем зоны и уникальные местообитания вместо повтора одинаковых предложений
     if all(x.startswith("зоны:") and "Местообитание:" in x for x in uniq):
-        ztypes, habs = [], []
-        tot_ring, tot_strip = 0.0, 0.0
+        zones, habs, tot = "", [], 0.0
         for x in uniq:
             head, _, tail = x.partition("Местообитание:")
-            m_r = re.search(r"кольцо ([^;(]+?)\s*\(([\d.,]+)\s*га\)", head)
-            if m_r:
-                lbl_r = f"кольцо {m_r.group(1).strip()}"
-                if lbl_r not in ztypes:
-                    ztypes.append(lbl_r)
-                tot_ring += float(m_r.group(2).replace(",", "."))
-            m_s = re.search(r"полоса ([^;(]+?)\s*\(([\d.,]+)\s*га\)", head)
-            if m_s:
-                lbl_s = f"полоса {m_s.group(1).strip()}"
-                if lbl_s not in ztypes:
-                    ztypes.append(lbl_s)
-                tot_strip += float(m_s.group(2).replace(",", "."))
-            if "по границе выдела" in head and "по границе выдела" not in ztypes:
-                ztypes.append("по границе выдела")
+            m_a = re.search(r"участок ([\d.,]+) га", head)
+            if m_a:
+                tot += float(m_a.group(1).replace(",", "."))
+            zones = zones or re.sub(r";?\s*в границах выдела; участок [^.]*", "",
+                                    head.removeprefix("зоны:")).strip(" .;")
             ht = tail.strip()
             if ht and ht not in habs:
                 habs.append(ht)
-        z_out = []
-        for zt in ztypes:
-            if zt.startswith("кольцо ") and tot_ring > 0:
-                z_out.append(f"{zt} ({tot_ring:.2f} га)")
-            elif zt.startswith("полоса ") and tot_strip > 0:
-                z_out.append(f"{zt} ({tot_strip:.2f} га)")
-            else:
-                z_out.append(zt)
-        return (f"зоны ({len(uniq)} уч.): {'; '.join(z_out)}. "
+        return (f"зоны ({len(uniq)} уч., {tot:.2f} га): {zones}. "
                 f"Местообитания: {' | '.join(habs)}")
     return "; ".join(uniq[:4]) + f" (и ещё {len(uniq) - 4} уч. в квартале)"
 
@@ -5017,14 +5274,14 @@ def write_diagnostics(out: Path, data, res):
 
 
 def _inf_label() -> str:
-    """Подпись слоя стихийных троп: «… OSM» при автоскачивании, «… (свой слой)» при своём файле."""
+    """Подпись слоя грунтовых дорог и троп: «… OSM» при автоскачивании, «… (свой слой)» при своём файле."""
     v = [str(x).strip().lower() for x in (getattr(_CUR_CFG, "informal_trails", None) or ["auto"])]
     if not any(x in ("auto", "авто", "osm") for x in v):
-        return "стихийные тропы (свой слой)"
-    k = getattr(_CUR_CFG, "osm_trail_kinds", None) or ["informal"]
-    if "unpaved" in k and "informal" in k:
-        return "стихийные и грунтовые тропы OSM"
-    return "грунтовые тропы OSM" if "unpaved" in k else "стихийные тропы OSM"
+        return "грунтовые дороги и тропы (свой слой)"
+    k = getattr(_CUR_CFG, "osm_trail_kinds", None) or ["informal", "unpaved"]
+    if "unpaved_inf" in k:
+        return "грунтовые неорганизованные дороги и тропы OSM"
+    return "грунтовые дороги и тропы OSM" if "unpaved" in k else "тропы OSM (informal=yes)"
 
 
 class Results:
@@ -5163,21 +5420,6 @@ class Results:
         out = table.loc[keep_idx].copy().reset_index(drop=True)
         out["Площадь участка, га"] = areas
         return gpd.GeoDataFrame(out, geometry=geoms, crs=WORK_EPSG)
-
-    def oozt_covered_ha(self, clip_geom=None) -> dict[str, float]:
-        """Истинная площадь покрытия ООЗТ мероприятиями (геометрическое объединение всех участков работ, га)."""
-        by_oo: dict[str, list] = {}
-        for r in self.rows:
-            g = r.get("_geom")
-            if g is not None and not g.is_empty:
-                by_oo.setdefault(str(r["ООЗТ"]), []).append(g)
-        res_d = {}
-        for oo, gs in by_oo.items():
-            u = _safe_union(gs)
-            if clip_geom is not None and not clip_geom.is_empty:
-                u = u.intersection(clip_geom)
-            res_d[oo] = round(float(u.area / 1e4), 2) if u is not None and not u.is_empty else 0.0
-        return res_d
 
     def evidence_gdf(self) -> gpd.GeoDataFrame | None:
         if not self.evidence:
@@ -5342,69 +5584,92 @@ def _trail_hotspots(data: Data, window=TRAIL_WINDOW_M, q=QUANTILE):
     return cache[key]
 
 
+def _square_trail_density(trails: gpd.GeoDataFrame, geom, win: float, cell: float = CELL):
+    """Плотность троп (м/га) в квадратном окне win × win с шагом cell вокруг geom:
+    длина линий в окне / площадь окна. → (растр плотности, transform, маска «внутри geom»)."""
+    tr = trails.explode(index_parts=False)
+    tr = tr[tr.geom_type == "LineString"]
+    n = max(1, int(round(win / cell)))
+    x0, y0, x1, y1 = geom.bounds
+    x0, y0, x1, y1 = x0 - win, y0 - win, x1 + win, y1 + win
+    W, H = int((x1 - x0) / cell) + 1, int((y1 - y0) / cell) + 1
+    L = np.zeros((H, W))
+    sub = tr[tr.intersects(box(x0, y0, x1, y1))]
+    for g in sub.geometry.segmentize(cell / 4):
+        c = np.asarray(g.coords)[:, :2]
+        if len(c) < 2:
+            continue
+        mid = (c[1:] + c[:-1]) / 2
+        ln = np.hypot(*(c[1:] - c[:-1]).T)
+        col = ((mid[:, 0] - x0) / cell).astype(int)
+        row = ((y1 - mid[:, 1]) / cell).astype(int)
+        ok = (col >= 0) & (col < W) & (row >= 0) & (row < H)
+        np.add.at(L, (row[ok], col[ok]), ln[ok])
+    dens = ndimage.uniform_filter(L, size=n, mode="constant") * n * n / (win * win / 1e4)
+    T = from_origin(x0, y1, cell, cell)
+    inside = rfeatures.rasterize([(geom, 1)], out_shape=(H, W), transform=T).astype(bool)
+    return dens, T, inside
+
+
 def rule_trail_density_vydel(data: Data, res: Results, measure: dict, p: dict):
-    """Плотность троп (м/га) по выделу; квантиль среди выделов всех ООЗТ заданного типа."""
-    if data.trails is None:
+    """Плотность троп в скользящем квадратном окне (по умолчанию 250 × 250 м, шаг 10 м): выдел назначается,
+    если его центр (точка внутри полигона) попадает в окно с плотностью ≥ порога. Порог — квантиль по ячейкам
+    окна внутри каждой ООЗТ отдельно или значение, м/га (окно скрипта). Участок работ — весь выдел."""
+    if data.trails is None or data.trails.empty:
         log.warning("  тропы не загружены — пропуск")
         return
-    q = p["quantile"]
-    abs_thr = p.get("abs_m_ha")
+    win = float(p.get("win_m") or I3_WINDOW_M)
+    abs_thr, q = p.get("abs_m_ha"), p.get("quantile")
     target = _target(data, p)
-    tu = _safe_union(data.trails.geometry.values)
-    dens = target.geometry.intersection(tu).length / target["area_ha"]
-    dens = dens.replace([np.inf], np.nan).fillna(0)
-    pos = dens[dens > 0]
-    if pos.empty:
-        log.warning("  тропы не пересекают ни одного подходящего полигона — плотность везде 0")
+    if target is None or target.empty:
         return
-    if abs_thr:                                   # абсолютный порог, м/га (вместо квартиля)
-        thr = float(abs_thr)
-        sel = target[dens >= thr]
-        log.info("  порог: абсолютный %g м/га", thr)
-
-        def _reason(d):
-            return f"плотность троп {d:.0f} м/га ≥ {thr:.0f} м/га (абсолютный порог)"
-    else:
-        thr = float(np.quantile(pos, q))
-        sel = target[dens >= thr]
-
-        def _reason(d):
-            return f"плотность троп {d:.0f} м/га ≥ {_qtag(q)} = {thr:.0f} м/га"
-    hot_polys = None
-    if not sel.empty:
-        hot_polys, _, _ = _trail_hotspots(data, TRAIL_WINDOW_M, q)
-    hot_union = (_safe_union(hot_polys.geometry.values)
-                 if hot_polys is not None and not hot_polys.empty else None)
-    ev_sel = []
-    for (_, r), d in zip(sel.iterrows(), dens[dens >= thr]):
-        wg = r.geometry
-        if data.cfg.unit_mode == "kv":
-            if hot_union is not None:
-                cand = wg.intersection(hot_union)
-                wg = cand if not cand.is_empty and cand.area > 1.0 else tu.intersection(wg).buffer(15.0).intersection(wg)
-            else:
-                wg = tu.intersection(wg).buffer(15.0).intersection(wg)
-        res.add(r, measure, _reason(d), round(d, 1), work_geom=wg)
-        ev_sel.append(wg)
+    ev_sel, hot_parts = [], []
+    for oo, geom in data.oozt.dissolve(by="OOZT").geometry.items():
+        dens, T, inside = _square_trail_density(data.trails, geom, win)
+        vals = dens[inside]
+        if not vals.size:
+            continue
+        if abs_thr:
+            thr, tag = float(abs_thr), f"{_fmt(abs_thr)} м/га (порог)"
+        else:
+            thr = float(np.quantile(vals, float(q)))
+            tag = f"{_qtag(float(q))} = {thr:.0f} м/га"
+        tg = target[target["OOZT"].astype(str) == str(oo)]
+        if tg.empty:
+            continue
+        H, W = dens.shape
+        pts = tg.geometry.representative_point()
+        cc = ((pts.x - T.c) / CELL).astype(int).clip(0, W - 1).values
+        rr = ((T.f - pts.y) / CELL).astype(int).clip(0, H - 1).values
+        dv = dens[rr, cc]
+        k = 0
+        for (_, r), d in zip(tg.iterrows(), dv):
+            if d >= thr:
+                res.add(r, measure, f"плотность троп в окне {win:.0f} × {win:.0f} м у центра {_unit_word()} "
+                                    f"{d:.0f} м/га ≥ {tag}", round(float(d), 1), work_geom=r.geometry)
+                ev_sel.append(r.geometry)
+                k += 1
+        hp = polygonize_mask((dens >= thr) & inside, T)
+        if hp is not None and not hp.empty:
+            hot_parts.append(hp)
+        log.info("  [%s] окно %.0f × %.0f м: медиана %.0f, порог %s → %d %s", oo, win, win,
+                 float(np.median(vals)), tag, k, _units())
     trails_in = None
-    if not sel.empty:
+    if ev_sel:
         res.add_evidence(gpd.GeoDataFrame(geometry=ev_sel, crs=WORK_EPSG),
-                         measure["name"], "лесные участки самовосстановления покрова")
-        # Красным показываем не целые исходные линии, а только их фрагменты
-        # внутри локальных пятен высокой плотности и выбранных выделов.
-        if hot_union is not None:
-            clip_geom = hot_union.intersection(_safe_union(sel.geometry.values))
+                         measure["name"], "участки восстановления травянистого покрова")
+        # красным — только фрагменты троп в ячейках с плотностью не ниже порога внутри выбранных выделов
+        if hot_parts:
+            hot = _safe_union(pd.concat(hot_parts, ignore_index=True).geometry.values)
+            clip_geom = hot.intersection(_safe_union(ev_sel))
             trails_in = data.trails[data.trails.intersects(clip_geom)].copy()
             if not trails_in.empty:
                 trails_in["geometry"] = trails_in.geometry.intersection(clip_geom)
                 trails_in = trails_in.explode(index_parts=False)
-                trails_in = trails_in[
-                    (~trails_in.is_empty)
-                    & trails_in.geom_type.isin(["LineString", "MultiLineString"])
-                ]
-    res.add_evidence(trails_in, measure["name"],
-                     "тропы в зонах повышенной плотности")
-    log.info("  → %d %s (порог %.0f м/га)", len(sel), _units(), thr)
+                trails_in = trails_in[(~trails_in.is_empty)
+                                      & trails_in.geom_type.isin(["LineString", "MultiLineString"])]
+    res.add_evidence(trails_in, measure["name"], "тропы в зонах повышенной плотности")
+    log.info("  → %d %s", len(ev_sel), _units())
 
 
 def rule_trail_hotspot(data: Data, res: Results, measure: dict, p: dict):
@@ -5477,6 +5742,8 @@ def _sp_label(p: dict, gen=False) -> str:
     """Компактная подпись выбранных видов для легенды и слоёв-обоснований (без длинных списков латыни)."""
     cats = p.get("category") or []
     taxa = p.get("taxon") or []
+    if INVASIVE_REF_TAXON in taxa:
+        return "инвазивных видов по справочнику" if gen else "инвазивные виды по справочнику"
     if taxa:
         if len(taxa) <= 2:
             if len(cats) == 1 and cats[0] == "инвазивные":
@@ -5492,8 +5759,11 @@ def _sp_label(p: dict, gen=False) -> str:
 
 
 def _taxon_mask(species: pd.Series, taxa) -> np.ndarray:
-    """Вид относится к таксону (род / вид); для полных биномов учитываются синонимы."""
-    tt = list(taxa)
+    """Вид относится к таксону (род / вид); для полных биномов учитываются синонимы.
+    «по справочнику» — все виды справочника инвазивных видов, кроме борщевика Сосновского."""
+    tt = [t for t in taxa if t != INVASIVE_REF_TAXON]
+    if INVASIVE_REF_TAXON in taxa:
+        tt += [k for k in invasive_ref() if k not in INVASIVE_REF_EXCLUDE]
     try:
         syn = synonym_groups()
         for t in list(tt):
@@ -5513,7 +5783,10 @@ def select_species(data: Data, p: dict):
             return None
         m = np.ones(len(g), dtype=bool)
         if p.get("category"):
-            m &= g["category"].isin(p["category"]).values
+            mc = np.array(g["category"].isin(p["category"]).values, dtype=bool)
+            if "инвазивные" in p["category"] and "inv_grp" in g.columns:
+                mc |= g["inv_grp"].notna().values       # инвазивный по справочнику — в любом слое
+            m &= mc
         if p.get("kk_categories"):
             if "kk_cat" not in g.columns:           # справочник КК не загрузился
                 return None
@@ -5546,7 +5819,8 @@ def select_species(data: Data, p: dict):
     rasters = []
     if _uses(p, "sdm"):
         for r in data.sp_rasters:
-            if p.get("category") and r["category"] not in p["category"]:
+            if p.get("category") and r["category"] not in p["category"] and not (
+                    "инвазивные" in p["category"] and r.get("inv_grp")):
                 continue
             if p.get("kk_categories") and r.get("kk_cat") not in p["kk_categories"]:
                 continue
@@ -5627,7 +5901,7 @@ def rule_species(data: Data, res: Results, measure: dict, p: dict):
                 coords.append(f"{s_} ({gg.x.mean():.6f}° в.д., {gg.y.mean():.6f}° с.ш.)")
             # локальный участок проведения работ вокруг точек находки (радиус 15 м внутри выдела)
             wg = _safe_union(grp.geometry.values).buffer(15.0).intersection(r.geometry)
-            res.add(r, measure, f"точечные находки: {', '.join(f'{k} ({v})' for k, v in sp.items())}; "
+            res.add(r, measure, f"точечные находки: {', '.join(f'{species_display(k)} — {v}' for k, v in sp.items())}; "
                                 f"координаты WGS 84: {'; '.join(coords)}", int(len(grp)), work_geom=wg)
         # борщевик Сосновского: на схемах — все точки в границах территории (без прореживания)
         if pts["species"].astype(str).str.contains("heracleum", case=False).any():
@@ -5643,7 +5917,7 @@ def rule_species(data: Data, res: Results, measure: dict, p: dict):
         for uid, grp in j.groupby("uid"):
             r = data.oozt[data.oozt["uid"] == uid].iloc[0]
             wg = _safe_union(grp.geometry.values)
-            txt = ", ".join(f"{s_} ({a:.2f} га)" for s_, a in grp.groupby("species")["ha"].sum().items())
+            txt = ", ".join(f"{species_display(s_)} — {a:.2f} га" for s_, a in grp.groupby("species")["ha"].sum().items())
             res.add(r, measure, f"в пределах полигонов находок: {txt}", round(float(wg.area / 1e4), 2),
                     work_geom=wg)
         res.add_evidence(j, measure["name"], f"{lab} — полигоны", "species")
@@ -5659,11 +5933,11 @@ def rule_species_trails(data: Data, res: Results, measure: dict, p: dict):
     if p.get("informal_only"):
         if data.trails_informal is not None:
             trails = data.trails_informal
-            log.info("  только стихийные тропы OSM (informal=yes): %d сегментов", len(trails))
+            log.info("  только %s: %d сегментов", _inf_label(), len(trails))
         else:
-            log.warning("  слой стихийных троп не загружен — используется вся дорожно-тропиночная сеть")
+            log.warning("  слой грунтовых дорог и троп не загружен — используется вся дорожно-тропиночная сеть")
     target = _target(data, p)
-    # ограничение по площади выдела (например, III.3 — ≥ 0,5 га, III.4 — < 0,5 га)
+    # ограничение по площади выдела (например, CAPEX-3-1 — > 5 га, CAPEX-3-2 — ≤ 5 га)
     amin, amax = p.get("vydel_min_ha"), p.get("vydel_max_ha")
     area_txt = ""
     if amin is not None or amax is not None:
@@ -5976,7 +6250,7 @@ def pond_polys(data) -> gpd.GeoDataFrame | None:
 WETLAND_COLOR = "#B4D796"     # болота на подложке схем (бледно-зелёный, RGB 180 215 150)
 
 
-# ---- I.8, I.9, I.11, III.7: объекты справочника водоёмов и болот ----------------------------
+# ---- CAPEX-1-3, 1-4, 1-5, 3-5: объекты справочника водоёмов и болот ----------------------------
 def _wr_find_polygon(pt, layers):
     """Контур для точки: полигон, содержащий точку (наименьший), иначе ближайший ≤ WATER_REF_SNAP_M."""
     for L in layers:
@@ -6014,7 +6288,7 @@ def _wr_write_unmatched(data):
 
 def rule_water_ref(data: Data, res: Results, measure: dict, p: dict):
     """Объекты справочника водоёмов и болот с отметкой мероприятия; участок работ — контур объекта ∩ ООЗТ."""
-    code = str(measure.get("code") or "").strip()
+    code = canon_code(measure.get("code"))
     ref = water_ref_marked(code)
     if ref is None:
         log.warning("  %s: справочник водоёмов и болот не найден — пропуск", measure["name"])
@@ -6044,9 +6318,9 @@ def rule_water_ref(data: Data, res: Results, measure: dict, p: dict):
     for _, o in pts.iterrows():
         is_bog = _norm_txt(o["cat"]).startswith("болот") or _norm_txt(o["otype"]).startswith("болот")
         lbl = f"«{o['name']}» ({o['oozt']}, кв. {o['kv'] or '—'}; лист «{o['sheet']}», строка {o['row']})"
-        if code == "I.8" and not is_bog:
-            log.warning("  %s: непрофильная категория «%s» для I.8 (ожидается болото)", lbl, o["cat"] or "—")
-        if code in ("I.9", "I.11", "III.7") and is_bog:
+        if code == "CAPEX-1-3" and not is_bog:
+            log.warning("  %s: непрофильная категория «%s» для %s (ожидается болото)", lbl, o["cat"] or "—", code)
+        if code in ("CAPEX-1-5", "CAPEX-3-5", "CAPEX-1-4") and is_bog:
             log.warning("  %s: непрофильная категория «Болото» для %s", lbl, code)
         layers = [wl, hp] if is_bog else [hp]
         L, idx, dist = _wr_find_polygon(o.geometry, layers)
@@ -6136,10 +6410,28 @@ def rule_water_ref(data: Data, res: Results, measure: dict, p: dict):
     _wr_write_unmatched(data)
 
 
-# ---- I.7: мозаичное выкашивание по структурному классу ----------------------------------------
+# ---- CAPEX-1-1 / CAPEX-1-2: мозаичное выкашивание по структурному классу ----------------------------------------
 def rule_struct_class(data: Data, res: Results, measure: dict, p: dict):
-    """Полигоны заданных структурных классов; участок работ — полигон экосистемы ∩ ООЗТ."""
+    """Полигоны заданных структурных классов; участок работ — полигон экосистемы ∩ ООЗТ.
+    «Очередь выкашивания»: 1 — площадь от … до … га включительно, 2 — крупнее верхней границы
+    (границы — в окне скрипта); пусто — без ограничения площади."""
     classes = list(p.get("struct_classes") or STRUCT_MOW_DEFAULT)
+    queue, lo, hi = p.get("mow_queue"), p.get("mow_lo_ha"), p.get("mow_hi_ha")
+    if queue == 2 and hi is None:
+        log.info("  2 очередь выкашивания не формируется: верхняя граница 1 очереди не задана")
+        return
+
+    def _area_ok(a):
+        if queue == 1:
+            return (lo is None or a >= float(lo)) and (hi is None or a <= float(hi))
+        if queue == 2:
+            return a > float(hi)
+        return True
+    q_txt = ("" if not queue else
+             f"; 1 очередь: площадь {('от ' + _fmt(lo) + ' ') if lo is not None else ''}"
+             f"{('до ' + _fmt(hi) + ' ') if hi is not None else ''}га включительно" if queue == 1 else
+             f"; 2 очередь: площадь больше {_fmt(hi)} га")
+    n_skip = 0
     want = {_norm_txt(c): c for c in classes}
     g = data.oozt
     has_struct = "Struct" in g.columns and g["Struct"].astype(str).str.strip().ne("").any()
@@ -6154,19 +6446,23 @@ def rule_struct_class(data: Data, res: Results, measure: dict, p: dict):
         wg = r.geometry.intersection(data.union)
         if wg.is_empty:
             continue
-        if res.add(r, measure, f"структурный класс «{hit}» ({wg.area / 1e4:.2f} га)",
-                   round(float(wg.area / 1e4), 2), work_geom=wg):
+        a = float(wg.area / 1e4)
+        if not _area_ok(round(a, 2)):
+            n_skip += 1
+            continue
+        if res.add(r, measure, f"структурный класс «{hit}» ({a:.2f} га){q_txt}", round(a, 2), work_geom=wg):
             n += 1
-    log.info("  структурные классы (%s): → %d %s", ", ".join(classes), n, _units())
+    log.info("  структурные классы (%s)%s: → %d %s%s", ", ".join(classes), q_txt, n, _units(),
+             f"; по площади не подходят — {n_skip}" if queue else "")
 
 
-# ---- III.3 / III.4: стихийные тропы в выделах с видами Красной книги ---------------------------
+# ---- CAPEX-3-1 / CAPEX-3-2: грунтовые дороги и тропы в выделах с видами Красной книги ---------------------------
 def rule_rare_trail_vydel(data: Data, res: Results, measure: dict, p: dict):
-    """Выделы с плотностью стихийных троп > порога и находками видов КК Москвы заданных категорий."""
+    """Выделы с плотностью грунтовых дорог и троп > порога и находками видов КК Москвы заданных категорий."""
     trails = data.trails_informal if p.get("informal_only", True) else data.trails
     if trails is None or trails.empty:
         log.warning("  %s: слой %s не загружен — пропуск", measure["name"],
-                    "стихийных троп (OSM informal=yes или свой слой)" if p.get("informal_only", True) else "троп")
+                    "грунтовых дорог и троп (OSM или свой слой)" if p.get("informal_only", True) else "троп")
         return
     p_sel = dict(p, groups=None, sources=[s for s in (p.get("sources") or ["points", "polygons"]) if s != "sdm"]
                  or ["points", "polygons"])
@@ -6206,10 +6502,10 @@ def rule_rare_trail_vydel(data: Data, res: Results, measure: dict, p: dict):
     tu = _safe_union(trails.geometry.values)
     dens = (target.geometry.intersection(tu).length / target["area_ha"]).replace([np.inf], np.nan).fillna(0)
     sel = target[dens > thr]
-    log.info("  выделов%s: %d; плотность стихийных троп > %g м/га — %d", _vydel_area_txt(p, " площадью "),
+    log.info("  выделов%s: %d; плотность грунтовых дорог и троп > %g м/га — %d", _vydel_area_txt(p, " площадью "),
              len(target), thr, len(sel))
     for oo, dd in dens.groupby(target["OOZT"]):
-        log.info("    %s: плотность стихийных троп в выделах — медиана %.0f, макс. %.0f м/га; выше порога %g — %d",
+        log.info("    %s: плотность грунтовых дорог и троп в выделах — медиана %.0f, макс. %.0f м/га; выше порога %g — %d",
                  oo, float(dd.median()), float(dd.max()), thr, int((dd > thr).sum()))
     DIAG.step("выделов с плотностью троп > %g м/га" % thr, sel)
     n, ev_t, ev_p = 0, [], []
@@ -6242,7 +6538,7 @@ def rule_rare_trail_vydel(data: Data, res: Results, measure: dict, p: dict):
                 log.warning("  нет сроков цветения в справочнике: %s", ", ".join(miss[:6]))
             season = months_text(ms) if ms else None
         sp_txt = ", ".join(f"{s_} (кат. {c})" for s_, c in sp.items())
-        basis = (f"виды КК Москвы: {sp_txt}; плотность стихийных троп {d:.0f} м/га > {thr:.0f} м/га; "
+        basis = (f"виды КК Москвы: {sp_txt}; плотность грунтовых дорог и троп {d:.0f} м/га > {thr:.0f} м/га; "
                  f"площадь выдела {r['area_ha']:.2f} га" + (f"; сроки по цветению: {season}" if season else ""))
         if res.add(r, measure, basis, round(float(d), 1), work_geom=r.geometry, season=season):
             n += 1
@@ -6352,7 +6648,7 @@ def _paved_roads(data: Data):
         cl = str(c).lower()
         if cl in ("surface", "highway", "fclass", "type", "road_type", "class"):
             vals = t[c].astype(str).str.lower()
-            mask = vals.apply(lambda s: any(w in s for w in PAVED_ROAD_WORDS))
+            mask = vals.apply(lambda s: "unpaved" not in s and any(w in s for w in PAVED_ROAD_WORDS))
             if mask.any() and not mask.all():
                 log.info("  дороги с твёрдым покрытием: %d из %d линий сети (по полю «%s»)",
                          int(mask.sum()), len(t), c)
@@ -6363,15 +6659,16 @@ def _paved_roads(data: Data):
 def rule_kolokolchik(data: Data, res: Results, measure: dict, p: dict):
     """«Колокольчик»: высаживание КК видов в типичных местообитаниях.
 
-    Полигоны проведения мероприятия строго очерчены географическими и экологическими условиями
-    (пересечение кольца 500–1000 м от внешней границы ООЗТ и/или 100-м полосы от дорог с твёрдым
-    покрытием с конкретными выделами широколиственных лесов, естественных лугов и понижений/западин;
-    целые кварталы никогда не назначаются)."""
+    Участок = местообитание (выдел широколиственного леса, естественного луга, понижения/западины)
+    ∩ кольцо 500–1000 м от внешней границы ООЗТ ∩ полоса 100 м от дорог с твёрдым покрытием (если слой
+    дорог не задан — только кольцо). Назначаются только участки крупнее порога из окна скрипта (га)."""
     target = _target(data, p)
     if target is None or target.empty:
         return
     lo, hi = p.get("ring") or (500.0, 1000.0)
     rd = float(p.get("road_dist") or 100.0)
+    min_ha = float(p.get("min_patch_ha") or 0.0)
+    n_small = 0
     # 1) кольцо 500–1000 м от внешней границы каждой ООЗТ внутрь территории
     rings: dict[str, object] = {}
     for oo, geom in data.oozt.dissolve(by="OOZT").geometry.items():
@@ -6397,40 +6694,39 @@ def rule_kolokolchik(data: Data, res: Results, measure: dict, p: dict):
         if hab is None:
             continue
         g = r.geometry
-        zones, z_geoms = [], []
+        zones = []
         ring = rings.get(str(r["OOZT"]))
-        if ring is not None:
-            zr = ring.intersection(g)
-            if not zr.is_empty and zr.area / 1e4 >= 0.01:
-                zones.append(f"кольцо {lo:.0f}–{hi:.0f} м от границы парка ({zr.area / 1e4:.2f} га)")
-                z_geoms.append(zr)
+        if ring is None:
+            continue
+        wg = ring.intersection(g)
+        if wg.is_empty or wg.area / 1e4 < 0.01:
+            continue
+        zones.append(f"кольцо {lo:.0f}–{hi:.0f} м от границы парка")
         if r_sidx is not None:
             gb = g.buffer(rd + 2.0)
             near_idx = list(r_sidx.query(gb, predicate="intersects"))
-            if near_idx:
-                segs = [roads.geometry.values[i].intersection(gb) for i in near_idx]
-                segs = [sg for sg in segs if sg is not None and not sg.is_empty]
-                if segs:
-                    zs = _safe_union([sg.buffer(rd, quad_segs=8) for sg in segs]).intersection(g)
-                    if not zs.is_empty and zs.area / 1e4 >= 0.01:
-                        zones.append(f"полоса {rd:.0f} м от дорог с твёрдым покрытием ({zs.area / 1e4:.2f} га)")
-                        z_geoms.append(zs)
-        if not z_geoms:
-            continue
-        wg = _safe_union(z_geoms)
+            segs = [roads.geometry.values[i].intersection(gb) for i in near_idx] if near_idx else []
+            segs = [sg for sg in segs if sg is not None and not sg.is_empty]
+            if not segs:
+                continue
+            wg = wg.intersection(_safe_union([sg.buffer(rd, quad_segs=8) for sg in segs]))
+            zones.append(f"полоса {rd:.0f} м от дорог с твёрдым покрытием")
         ha = float(wg.area / 1e4)
         if ha < 0.01:
             continue
-        zones.append("по границе выдела")
+        if ha <= min_ha:
+            n_small += 1
+            continue
+        zones.append(f"в границах выдела; участок {ha:.2f} га > {_fmt(min_ha)} га")
         res.add(r, measure, f"зоны: {'; '.join(zones)}. Местообитание: {hab[0]} — высадить: {hab[1]}",
                 round(ha, 2), work_geom=wg)
         ev_rows.append({"hab": f"{hab[0]}: {hab[1]}", "geometry": wg})
     if ev_rows:
         res.add_evidence(gpd.GeoDataFrame(ev_rows, crs=WORK_EPSG),
                          measure["name"], "участки высаживания («Колокольчик»)", "hab")
-    log.info("  «Колокольчик»: кольцо %s–%s м, полоса %s м от дорог → %d участков (%.1f га)",
-             lo, hi, rd, len(ev_rows),
-             sum(x["geometry"].area for x in ev_rows) / 1e4 if ev_rows else 0.0)
+    log.info("  «Колокольчик»: кольцо %s–%s м ∩ полоса %s м от дорог, участки > %s га → %d участков (%.1f га); "
+             "мельче порога — %d", lo, hi, rd, _fmt(min_ha), len(ev_rows),
+             sum(x["geometry"].area for x in ev_rows) / 1e4 if ev_rows else 0.0, n_small)
 
 
 RULE_FUNCS = {
@@ -6465,7 +6761,7 @@ def spec_pad_m(measures) -> float:
     for m in measures or []:
         if m.get("on"):
             p = measure_spec(m).get("p", {})
-            v = max([v] + [float(p[k]) for k in ("window", "dist", "dist_max") if p.get(k)])
+            v = max([v] + [float(p[k]) for k in ("window", "dist", "dist_max", "win_m") if p.get(k)])
     return v
 
 
@@ -6488,7 +6784,7 @@ def read_measures(path: str) -> list[dict]:
     if not (c_name and c_on and c_method):
         raise ValueError(f"В Excel не найдены колонки «Мероприятия», «Вкл/выкл», «Метод выявления»: {list(df.columns)}")
     df[c_group] = df[c_group].ffill() if c_group else ""
-    code_re = re.compile(r"^[IVX]+\.\d+$")
+    code_re = re.compile(rf"^(?:{CODE_RE_TXT})$", re.I)
     c_code = next((c for c in df.columns
                    if df[c].dropna().astype(str).str.strip().str.match(code_re).mean() > 0.6), None)
     spec_cols = {}
@@ -6516,25 +6812,44 @@ def read_measures(path: str) -> list[dict]:
     for i, r in df.iterrows():
         if pd.isna(r[c_name]):
             continue
-        on = str(r[c_on]).strip().lower() in ("1", "1.0", "true", "да", "yes", "вкл")
+        on_raw = "" if pd.isna(r[c_on]) else str(r[c_on]).strip()
+        on = on_raw.lower() in ("1", "1.0", "true", "да", "yes", "вкл")
         flags = {}
         for c, oo in oozt_flag_cols.items():
             v = _flag(r.get(c))
             if v is not None:
                 flags[oo] = v
+        code = canon_code(r[c_code]) if c_code and not pd.isna(r[c_code]) else ""
+        base, grp_title = code_group(code)
+        grp = re.sub(r"\s+", " ", str(r[c_group])).strip() if c_group and not pd.isna(r[c_group]) else ""
         out.append({
             "name": re.sub(r"\s+", " ", str(r[c_name])).strip(),
-            "code": str(r[c_code]).strip() if c_code and not pd.isna(r[c_code]) else "",
+            "code": code,
+            "base": base,
             "on": on,
             "oozt_on": flags,
             "method": None if pd.isna(r[c_method]) else str(r[c_method]).strip(),
-            "group": re.sub(r"\s+", " ", str(r[c_group])).strip() if c_group and not pd.isna(r[c_group]) else "",
+            "group": grp_title or grp,
             "eco": str(r[c_eco]).strip() if c_eco and not pd.isna(r[c_eco]) else "",
             "prikaz": str(r[c_prikaz]).strip() if c_prikaz and not pd.isna(r[c_prikaz]) else "",
             "season": str(r[c_season]).strip() if c_season and not pd.isna(r[c_season]) else "",
             "spec": {k: (None if pd.isna(r[c]) else r[c]) for k, c in spec_cols.items()},
             "row": int(i) + 2,                 # номер строки в Excel (для записи описаний)
+            "_on_blank": not on_raw,
         })
+    # 2 очередь выкашивания включается / выключается вместе с 1 очередью, если её флаги не заполнены
+    def _queue(m):
+        v = str((m.get("spec") or {}).get("mow_queue") or "").strip().removesuffix(".0")
+        return v if str((m.get("spec") or {}).get("rule") or "").strip() else ""
+    q1 = next((m for m in out if _queue(m) == "1"), None)
+    for m in out:
+        if q1 is not None and _queue(m) == "2":
+            if m["_on_blank"]:
+                m["on"] = q1["on"]
+            for oo, v in q1["oozt_on"].items():
+                m["oozt_on"].setdefault(oo, v)
+    for m in out:
+        m.pop("_on_blank", None)
     log.info("Таблица мероприятий: %d строк, включено %d", len(out), sum(m["on"] for m in out))
     return out
 
@@ -6548,7 +6863,9 @@ def _cell_value(key: str, v):
     if key == "sources":
         return ", ".join({"points": "точки", "polygons": "полигоны", "sdm": "SDM"}[x] for x in v) if v else "любые"
     if key == "taxon":
-        return ", ".join(v) if v else None
+        return ", ".join("по справочнику" if t == INVASIVE_REF_TAXON else t for t in v) if v else None
+    if key == "mow_queue":
+        return None if v is None else int(v)
     return None if v is None else float(v)
 
 
@@ -6730,21 +7047,6 @@ LAYER_STYLE = {
     "Corvus — точки": ("#000000", "point"),
     "плотность Corvus (Q75)": ("#7f7f7f", "poly"),
 }
-TYPE_COLORS = {"лес": "#b7dfb0", "луг": "#f5e9a6", "околовод": "#bfe3ea", "водн": "#9ec9ff"}
-
-
-_TYPE_FALLBACK = ["#e6d3f5", "#f7d6c4", "#d9d9d9", "#cfe8cf", "#ffe0e0"]
-
-
-def _type_color(t: str):
-    t = str(t).lower()
-    for k, c in TYPE_COLORS.items():
-        if k in t:
-            return c
-    # неизвестный тип выдела: устойчивый цвет из резервной палитры (чтобы попал в легенду)
-    return _TYPE_FALLBACK[hash(t) % len(_TYPE_FALLBACK)]
-
-
 def _slope_style(layer):
     if layer.startswith("уклон"):
         # 50% и 70% чёрного соответственно.
@@ -7110,7 +7412,7 @@ def _season_suffix(season) -> str:
 def _measure_fig_name(oozt_name: str, idx: int, code: str, measure_name: str) -> str:
     """Короткое безопасное имя PNG-файла для частной схемы мероприятия (под Windows MAX_PATH)."""
     oo_s = re.sub(r"\W+", "_", str(oozt_name)).strip("_")[:26] or "oozt"
-    cd_s = re.sub(r"\W+", "_", str(code)).strip("_")[:8]
+    cd_s = re.sub(r"\W+", "_", str(code)).strip("_")[:10]
     nm_s = re.sub(r"\W+", "_", str(measure_name)).strip("_")[:34] or "measure"
     mid = f"{cd_s}_{nm_s}" if cd_s else nm_s
     return f"fig_{oo_s}_m{idx:02d}_{mid}.png"
@@ -7132,6 +7434,7 @@ def draw_oozt(data: Data, evidence: gpd.GeoDataFrame | None, oozt_name: str, out
     geom, ext, w, h = ctx["geom"], ctx["ext"], ctx["w"], ctx["h"]
     fig_w, fig_h = ctx["fig_w"], ctx["fig_h"]
     fig, ax = plt.subplots(figsize=(fig_w, fig_h), dpi=200)
+    fig.canvas.draw_idle = lambda *a, **k: None   # geopandas .plot() иначе перерисовывает всю фигуру
     ax.set_aspect("equal", adjustable="box")
     ax.set_xlim(ext[0], ext[1])
     ax.set_ylim(ext[2], ext[3])
@@ -7329,7 +7632,7 @@ def draw_oozt(data: Data, evidence: gpd.GeoDataFrame | None, oozt_name: str, out
                           reserved=reserved_boxes)
         except Exception:
             pass
-    fig.savefig(out_png, bbox_inches="tight")
+    fig.savefig(out_png, bbox_inches="tight", pil_kwargs={"compress_level": 3})   # быстрее сжатие PNG
     plt.close(fig)
     return True
 
@@ -7365,6 +7668,7 @@ def draw_kvartal(data: Data, evidence: gpd.GeoDataFrame | None, kv, oozt_name, o
     w, h = ext[1] - ext[0], ext[3] - ext[2]
     fig_w, fig_h = _utm_figsize(w, h)
     fig, ax = plt.subplots(figsize=(fig_w, fig_h), dpi=200)
+    fig.canvas.draw_idle = lambda *a, **k: None   # geopandas .plot() иначе перерисовывает всю фигуру
     ax.set_aspect("equal", adjustable="box")
     plt.rcParams.update({"font.size": 12})
 
@@ -7593,19 +7897,9 @@ def draw_kvartal(data: Data, evidence: gpd.GeoDataFrame | None, kv, oozt_name, o
         ax.text(0.995, 0.005, f"подписаны {n_lab} из {len(lab_items)} полигонов; полный перечень — в таблице",
                 transform=ax.transAxes, ha="right", va="bottom", fontsize=9, color="#444444", zorder=14,
                 path_effects=[pe.withStroke(linewidth=3, foreground="white")])
-    fig.savefig(out_png, bbox_inches="tight")
+    fig.savefig(out_png, bbox_inches="tight", pil_kwargs={"compress_level": 3})   # быстрее сжатие PNG
     plt.close(fig)
     return used_layers
-
-
-def md_table(df: pd.DataFrame, cols: list[str]) -> str:
-    def esc(x):
-        s = "" if pd.isna(x) else str(x)
-        return s.replace("|", "／").replace("\n", " ")
-    lines = ["| " + " | ".join(cols) + " |", "|" + "|".join(["---"] * len(cols)) + "|"]
-    for _, r in df.iterrows():
-        lines.append("| " + " | ".join(esc(r[c]) for c in cols) + " |")
-    return "\n".join(lines)
 
 
 def units_table(data: Data, res: Results) -> pd.DataFrame:
@@ -7801,12 +8095,58 @@ def oozt_summary(data: Data, table: pd.DataFrame, units: pd.DataFrame,
     return df
 
 
+def _measure_base_map(data: Data) -> tuple[dict, dict]:
+    """Мероприятие → базовая группа (CAPEX / OPEX) и тип мероприятий → базовая группа (по таблице мероприятий)."""
+    by_name, by_group = {}, {}
+    for m in getattr(data, "measures", None) or []:
+        b = m.get("base") or code_group(m.get("code", ""))[0]
+        if b:
+            by_name.setdefault(str(m.get("name", "")), b)
+            if m.get("group"):
+                by_group.setdefault(str(m["group"]), b)
+    return by_name, by_group
+
+
+def _base_of(by_name: dict, by_group: dict, name, group) -> str:
+    return by_name.get(str(name)) or by_group.get(str(group)) or ""
+
+
+def _base_order(b: str) -> int:
+    return 0 if str(b).startswith("CAPEX") else 1 if str(b).startswith("OPEX") else 2
+
+
+def _covered_ha_by_base(data: Data, res, measures_gdf, by_name: dict, by_group: dict) -> dict:
+    """Площадь без наложений (га) по (ООЗТ, базовая группа): объединение участков работ всех мероприятий группы."""
+    oo_geoms = _oozt_union_geoms(data)
+    buckets: dict[tuple, list] = {}
+    if res is not None and res.rows:
+        for r in res.rows:
+            g = r.get("_geom")
+            if g is not None and not g.is_empty:
+                b = _base_of(by_name, by_group, r.get("Мероприятие", ""), r.get("Тип мероприятий", ""))
+                buckets.setdefault((str(r["ООЗТ"]), b), []).append(g)
+    elif measures_gdf is not None and not measures_gdf.empty and {"ООЗТ", "Мероприятие"} <= set(measures_gdf.columns):
+        mg = measures_gdf.to_crs(WORK_EPSG) if measures_gdf.crs and measures_gdf.crs.to_epsg() != WORK_EPSG else measures_gdf
+        for _, r in mg.iterrows():
+            g = r.geometry
+            if g is not None and not g.is_empty:
+                b = _base_of(by_name, by_group, r["Мероприятие"], r.get("Тип мероприятий", ""))
+                buckets.setdefault((str(r["ООЗТ"]), b), []).append(g)
+    out = {}
+    for k, gs in buckets.items():
+        ug = _safe_union(gs)
+        if k[0] in oo_geoms and oo_geoms[k[0]] is not None and ug is not None:
+            ug = ug.intersection(oo_geoms[k[0]])
+        out[k] = round(float(ug.area / 1e4), 2) if ug is not None and not ug.is_empty else 0.0
+    return out
+
+
 def oozt_measure_summary(data: Data, table: pd.DataFrame, units: pd.DataFrame,
                          res: "Results | None" = None,
                          measures_gdf: gpd.GeoDataFrame | None = None) -> pd.DataFrame:
     """Сводка ООЗТ × мероприятие: в штуках (кварталы, участки), гектарах и % от общей площади ООЗТ."""
     cols = [
-        "ООЗТ", "Площадь ООЗТ, га", "Тип мероприятий", "Мероприятие", "Пункт Приказа",
+        "ООЗТ", "Площадь ООЗТ, га", "Базовая группа", "Тип мероприятий", "Мероприятие", "Пункт Приказа",
         "Кварталов с мероприятием, шт", "% кварталов ООЗТ",
         "Участков проведения, шт", "Объектов, шт", "Площадь проведения, га", "% от площади ООЗТ",
     ]
@@ -7842,6 +8182,8 @@ def oozt_measure_summary(data: Data, table: pd.DataFrame, units: pd.DataFrame,
         }
     )
     g["Площадь ООЗТ, га"] = [areas.get(o, (0.0, 0))[0] for o in g["ООЗТ"]]
+    bn, bg = _measure_base_map(data)
+    g["Базовая группа"] = [_base_of(bn, bg, m, t) for m, t in zip(g["Мероприятие"], g["Тип мероприятий"])]
     g["Объектов, шт"] = [len(n_obj[(str(o), str(m))]) if (str(o), str(m)) in n_obj else None
                         for o, m in zip(g["ООЗТ"], g["Мероприятие"])]
     g["% кварталов ООЗТ"] = [
@@ -7870,7 +8212,7 @@ def oozt_type_summary(data: Data, table: pd.DataFrame, units: pd.DataFrame,
                       measures_gdf: gpd.GeoDataFrame | None = None) -> pd.DataFrame:
     """Сводка ООЗТ × тип мероприятий: мероприятия и назначения в штуках, площадь в га и % от ООЗТ."""
     cols = [
-        "ООЗТ", "Площадь ООЗТ, га", "Тип мероприятий",
+        "ООЗТ", "Площадь ООЗТ, га", "Базовая группа", "Тип мероприятий",
         "Уникальных мероприятий, шт", "Назначений (квартал × мероприятие), шт",
         "Кварталов с данным типом, шт", "Участков проведения, шт",
         "Площадь проведения (без наложений), га", "% от площади ООЗТ",
@@ -7891,24 +8233,39 @@ def oozt_type_summary(data: Data, table: pd.DataFrame, units: pd.DataFrame,
     if table is not None and not table.empty and "Тип мероприятий" in table.columns:
         for (o, tp), grp in table.groupby([table["ООЗТ"].astype(str), table["Тип мероприятий"].astype(str)]):
             asg_cnt[(o, tp)] = int(len(grp))
-    rows = []
-    for (o, tp), grp in u.groupby(["ООЗТ", "Тип мероприятий"]):
+    bn, bg = _measure_base_map(data)
+    u["Базовая группа"] = [_base_of(bn, bg, m, t) for m, t in zip(u["Мероприятие"], u["Тип мероприятий"])]
+    cov_ob = _covered_ha_by_base(data, res, measures_gdf, bn, bg)
+    has_asg = table is not None and not table.empty and "Тип мероприятий" in table.columns
+
+    def _row(o, b, tp, grp, cov_ha, asg):
         a_tot = areas.get(str(o), (0.0, 0))[0]
-        cov_ha = cov_ot.get((str(o), str(tp)), round(float(grp["Площадь, га"].sum()), 2))
         if a_tot:
             cov_ha = min(cov_ha, round(float(a_tot), 2))
-        sum_ha = round(float(grp["Площадь, га"].sum()), 2)
-        rows.append([
-            str(o), round(float(a_tot), 2), str(tp),
-            int(grp["Мероприятие"].nunique()),
-            asg_cnt.get((str(o), str(tp)), int(grp[["Квартал", "Мероприятие"]].drop_duplicates().shape[0])),
+        return [
+            str(o), round(float(a_tot), 2), b, tp,
+            int(grp["Мероприятие"].nunique()), asg,
             int(grp["Квартал"].nunique()),
             int(len(grp)),
             cov_ha,
             round(100.0 * cov_ha / a_tot, 2) if a_tot else None,
-            sum_ha,
-        ])
-    return pd.DataFrame(rows, columns=cols).sort_values(["ООЗТ", "Тип мероприятий"]).reset_index(drop=True)
+            round(float(grp["Площадь, га"].sum()), 2),
+        ]
+    rows = []
+    for o, go in u.groupby("ООЗТ", sort=True):
+        for b, gb in sorted(go.groupby("Базовая группа"), key=lambda kv: (_base_order(kv[0]), kv[0])):
+            n_asg_b = 0
+            for tp, grp in gb.groupby("Тип мероприятий", sort=True):
+                asg = asg_cnt.get((str(o), str(tp)), int(grp[["Квартал", "Мероприятие"]].drop_duplicates().shape[0]))
+                n_asg_b += asg
+                cov_ha = cov_ot.get((str(o), str(tp)), round(float(grp["Площадь, га"].sum()), 2))
+                rows.append(_row(o, b, str(tp), grp, cov_ha, asg))
+            if b:
+                # итог по базовой группе CAPEX / OPEX: площадь — объединение всех её участков работ
+                cov_b = cov_ob.get((str(o), b), round(float(gb["Площадь, га"].sum()), 2))
+                asg_b = n_asg_b if has_asg else int(gb[["Квартал", "Мероприятие"]].drop_duplicates().shape[0])
+                rows.append(_row(o, b, f"ИТОГО: {b}", gb, cov_b, asg_b))
+    return pd.DataFrame(rows, columns=cols)
 
 
 def oozt_kvartal_summary(data: Data, table: pd.DataFrame, units: pd.DataFrame,
@@ -7954,16 +8311,18 @@ def oozt_kvartal_summary(data: Data, table: pd.DataFrame, units: pd.DataFrame,
 
 def oozt_pivot_summary(data: Data, ms: pd.DataFrame) -> pd.DataFrame:
     """Перекрёстная матрица: строки — все назначенные мероприятия, столбцы — по каждому ООЗТ (кварталов шт., га, % от ООЗТ)."""
-    base_cols = ["Тип мероприятий", "Мероприятие", "Пункт Приказа"]
+    base_cols = ["Базовая группа", "Тип мероприятий", "Мероприятие", "Пункт Приказа"]
     if ms is None or ms.empty:
         return pd.DataFrame(columns=base_cols)
+    if "Базовая группа" not in ms.columns:
+        ms = ms.assign(**{"Базовая группа": ""})
     oos = sorted(ms["ООЗТ"].astype(str).unique())
     m_meta = ms[base_cols].drop_duplicates(["Мероприятие"]).reset_index(drop=True)
     idx_map = {(str(r["ООЗТ"]), str(r["Мероприятие"])): r for _, r in ms.iterrows()}
     out_rows = []
     for _, mr in m_meta.iterrows():
         m = str(mr["Мероприятие"])
-        row = [mr["Тип мероприятий"], m, mr["Пункт Приказа"]]
+        row = [mr["Базовая группа"], mr["Тип мероприятий"], m, mr["Пункт Приказа"]]
         tot_kv, tot_ha = 0, 0.0
         for o in oos:
             rec = idx_map.get((o, m))
@@ -8011,7 +8370,8 @@ def _format_summary_sheets(book, sheet_names: list[str]):
             cell.alignment = Alignment(wrap_text=True, vertical="center", horizontal="center")
         ws.row_dimensions[1].height = 34
         for r_idx in range(2, ws.max_row + 1):
-            is_total = str(ws.cell(r_idx, 1).value or "") == "ИТОГО"
+            is_total = any(str(ws.cell(r_idx, c_).value or "").startswith("ИТОГО")
+                           for c_ in range(1, min(4, ws.max_column) + 1))
             for c_idx in range(1, ws.max_column + 1):
                 cell = ws.cell(r_idx, c_idx)
                 hdr = headers[c_idx - 1]
@@ -8036,7 +8396,7 @@ def _format_summary_sheets(book, sheet_names: list[str]):
                 w = 56
             elif hdr == "Мероприятие":
                 w = 46
-            elif hdr in ("ООЗТ", "Тип мероприятий"):
+            elif hdr in ("ООЗТ", "Тип мероприятий", "Базовая группа"):
                 w = 28
             elif "га" in hdr or "%" in hdr or "шт" in hdr:
                 w = max(14, min(24, len(hdr) // 2 + 6))
@@ -9038,7 +9398,6 @@ def build_report(data: Data, table: pd.DataFrame, evidence, out_dir: Path, kv_li
                  res: "Results | None" = None,
                  measures_gdf: gpd.GeoDataFrame | None = None):
     enable_win_dll_path()
-    cfg = data.cfg
     rep = out_dir / "report"
     rep.mkdir(parents=True, exist_ok=True)
     kv_all = _report_groups_table(data, kv_list)
@@ -9208,7 +9567,7 @@ def write_qgis_project(out: Path, cfg: Config, data: "Data", gpkg: Path, terr_la
     terr_choro = add_vec(terr_title, terr_layer, "poly",
                          _q_categorized("n_measures", cats), labels=_q_labels(label_field), visible=False)
     # 3а) контекстные слои подложки (в границах ООЗТ): дороги, гидрография,
-    #     горизонтали, рекреация, стихийные тропы, все точки ПВН — из evidence.gpkg
+    #     горизонтали, рекреация, грунтовые дороги и тропы, все точки ПВН — из evidence.gpkg
     _CTX_TITLE = {"rivers_ditches": "Реки и канавы", "lakes_ponds": "Озёра и пруды",
                   "roads_paved": "Дороги с твёрдым покрытием", "roads_dirt": "Дороги грунтовые",
                   "contours": "Горизонтали (2,5 м)", "recreation_points": "Рекреация: объекты",
@@ -9447,7 +9806,7 @@ def run(cfg: Config):
     PROG.phase("Чтение таблицы мероприятий", 0, 2)
     measures = read_measures(cfg.measures_xlsx)
     PROG.phase("Загрузка слоёв", 2, 15)
-    # слой стихийных троп скачивается, только если он нужен включённому мероприятию
+    # слой грунтовых дорог и троп скачивается, только если он нужен включённому мероприятию
     cfg._need_informal = any(
         m.get("on") and measure_spec(m).get("p", {}).get("informal_only") for m in measures)
     data = Data(cfg, pad_m=spec_pad_m(measures))
@@ -9703,7 +10062,7 @@ def run(cfg: Config):
                                   {"Point": "point", "LineString": "line"}.get(gt, "poly"),
                                   sorted(grp["layer"].astype(str).unique())))
         # ---- контекстные слои подложки (в границах ООЗТ): дороги, гидрография,
-        # рекреация, стихийные тропы, горизонтали, все точки ПВН — в GeoPackage для проекта QGIS
+        # рекреация, грунтовые дороги и тропы, горизонтали, все точки ПВН — в GeoPackage для проекта QGIS
         ctx_layers, heatmap_tif = [], None
         try:
             def _ctx_write(name, g, geom, color, width=0.8, alpha=None, cat_field=None, clip_to_oozt=True, keep_cols=None):

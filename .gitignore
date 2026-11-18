@@ -67,3 +67,5 @@ measures/*_до_правил.xlsx
 osm_cache/
 *.osm.pbf
 *.part
+oozt_recs_last.json
+mpl_cache/

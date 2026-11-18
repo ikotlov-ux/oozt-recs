@@ -79,5 +79,16 @@
     "VYD": "FID_ecosys",
     "TYPE": "Type",
     "NAME": "Name"
-  }
+  },
+  "osm_trail_kinds": [
+    "informal",
+    "unpaved"
+  ],
+  "i3_thr_mode": "quantile",
+  "i3_quantile": 0.9,
+  "i3_value_m_ha": 250.0,
+  "rare_trail_m_ha": 100.0,
+  "mow_q1_min_ha": 1.0,
+  "mow_q1_max_ha": 5.0,
+  "reintro_min_ha": 2.0
 }
