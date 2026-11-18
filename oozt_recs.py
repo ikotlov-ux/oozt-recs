@@ -320,7 +320,7 @@ TYPE_NEARWATER = ("околовод", "болот")
 
 # Антропогенные луга: газоны (тип 503) и бурьян (тип 222); остальные луговые — естественные.
 # Маркеры ищутся подстрокой в значении поля типа (в т. ч. с кодами: «Газоны 503», «бурьян 222»).
-ANTHRO_MEADOW_MARKS = ("газон", "бурьян", "бурья", "503", "222")
+ANTHRO_MEADOW_MARKS = ("газон", "бурьян", "бурья", "503", "222", "антропоген")
 
 
 # Структурные классы экосистем (поле «Структурный класс»; коды class_value — три последние цифры)
@@ -355,6 +355,42 @@ def struct_class_of(value) -> str:
         code = int(m.group(1)[-3:])
         return STRUCT_CODE_CLASSES.get(code, t)
     return t
+
+
+_STRUCT_KNOWN = {re.sub(r"\s+", " ", v.lower().replace("ё", "е")) for v in STRUCT_CODE_CLASSES.values()} | {"водные объекты"}
+
+
+def struct_known_share(series) -> float:
+    """Доля значений поля, распознанных как структурные классы экосистем (по названию или коду class_value)."""
+    s = pd.Series(series).dropna()
+    if s.empty:
+        return 0.0
+    return float(s.map(lambda v: _norm_txt(struct_class_of(v)) in _STRUCT_KNOWN).mean())
+
+
+def type_recognized(value) -> bool:
+    """Значение поля типа содержит слово, по которому работают правила по типу (лес, луг, водн, околовод, болот)."""
+    t = str(value or "").lower().replace("ё", "е")
+    return any(k in t for k in TYPE_FOREST + TYPE_MEADOW + TYPE_WATER + TYPE_NEARWATER)
+
+
+def broad_type_of_struct(value) -> str:
+    """Структурный класс → укрупнённый тип для правил «по типу полигона»: «лесные — Хвойные леса»,
+    «луговые — Мезофитные луга», «околоводные, болотные — Болота», «водные — Водные объекты»;
+    антропогенные и нераспознанные — пусто."""
+    sc = struct_class_of(value)
+    t = _norm_txt(sc)
+    if not t:
+        return ""
+    if "лес" in t:
+        return f"лесные — {sc}"
+    if "луг" in t:
+        return f"луговые — {sc}"
+    if "болот" in t:
+        return f"околоводные, болотные — {sc}"
+    if t.startswith("вод"):
+        return f"водные — {sc}"
+    return ""
 
 
 def _anthro_meadow(text) -> bool:
@@ -425,7 +461,7 @@ class Config:
         # справочники по умолчанию — из папки refdata/ рядом со скриптом
         for key, name in REF_DEFAULTS.items():
             if not getattr(self, key, None):
-                d = _REF_DIR / name
+                d = _refdata_file(name)
                 setattr(self, key, str(d) if d.exists() else None)
 
     def save(self, path: str | Path):
@@ -2435,9 +2471,32 @@ class SetupWindow:
             parts, unk = [], []
             for t, n in vc.items():
                 (parts if any(k in t.lower() for k in known) else unk).append(f"{t} — {n}")
-            txt = f"Полигонов: {len(self.attr_df)}. Типы, распознаваемые правилами: " + (", ".join(parts) or "нет")
-            if unk:
-                txt += ". Не используются правилами по типу: " + ", ".join(unk[:8])
+            sf = cfg.fields.get(STRUCT_FIELD)
+            s_note = ""
+            if not sf or sf not in self.attr_df.columns or struct_known_share(self.attr_df[sf]) < 0.05:
+                # как при расчёте: стандартное поле структурного класса или коды class_value
+                alt = next((c for c in STRUCT_FIELD_CANDS + ["class_value"] if c in self.attr_df.columns
+                            and c != sf and struct_known_share(self.attr_df[c]) >= 0.5), None)
+                if sf and sf in self.attr_df.columns:
+                    s_note = (f". ! В поле «{sf}» нет структурных классов экосистем (луга, леса…) — " +
+                              (f"при расчёте будет взято поле «{alt}»" if alt else
+                               "выберите поле структурного класса, иначе I.7 не назначится"))
+                sf = alt or sf
+            n_rec = sum(n for t, n in vc.items() if type_recognized(t))
+            s_ok = (sf in self.attr_df.columns and struct_known_share(self.attr_df[sf]) >= 0.5)
+            if n_rec < 0.5 * len(self.attr_df) and s_ok:
+                # тип без слов «лесные / луговые…» — при расчёте укрупнённый тип берётся из структурного класса
+                vb = self.attr_df[sf].map(broad_type_of_struct)
+                vb = vb[vb != ""].str.split(" — ").str[0].value_counts()
+                txt = (f"Полигонов: {len(self.attr_df)}. В поле «{tf}» нет типов лесные / луговые / водные / "
+                       f"околоводные — тип полигона будет определён по структурному классу «{sf}»: "
+                       + ", ".join(f"{t} — {n}" for t, n in vb.items()))
+                parts = list(vb.index)
+            else:
+                txt = f"Полигонов: {len(self.attr_df)}. Типы, распознаваемые правилами: " + (", ".join(parts) or "нет")
+                if unk:
+                    txt += ". Не используются правилами по типу: " + ", ".join(unk[:8])
+            txt += s_note
             idf = cfg.fields.get("ID")
             if cfg.unit_mode == "eco" and idf in self.attr_df.columns:
                 dup = int(self.attr_df[idf].duplicated().sum())
@@ -3079,6 +3138,41 @@ try:
 except NameError:                        # Jupyter: __file__ не определён
     _REF_DIR = Path.cwd() / "refdata"
 _REF_CACHE: dict = {}
+REFDATA_URL = "https://raw.githubusercontent.com/ikotlov-ux/oozt-recs/main/refdata/"
+_REF_FETCHED: dict = {}
+
+
+def _refdata_file(name: str) -> Path:
+    """Файл справочника из папки refdata/ рядом со скриптом. Если папки или файла нет (скопирован только
+    oozt_recs.py), файл один раз скачивается из репозитория скрипта в refdata/ (или во временную папку,
+    если рядом со скриптом нельзя писать). Без справочника kk_moscow.csv категории Красной книги не
+    определяются и правила по КК (III.3, III.4) ничего не находят."""
+    p = _REF_DIR / name
+    if p.exists():
+        return p
+    if name in _REF_FETCHED:
+        return _REF_FETCHED[name] or p
+    _REF_FETCHED[name] = None
+    url = REFDATA_URL + urllib.parse.quote(name)
+    for d in (_REF_DIR, Path(tempfile.gettempdir()) / "oozt_recs_refdata"):
+        try:
+            d.mkdir(parents=True, exist_ok=True)
+            q = d / name
+            with urllib.request.urlopen(url, timeout=30) as r:
+                data = r.read()
+            q.write_bytes(data)
+            log.warning("Справочник %s не найден в папке %s — скачан из репозитория скрипта в %s",
+                        name, _REF_DIR, q)
+            _REF_FETCHED[name] = q
+            return q
+        except OSError as e:
+            err = e
+            continue
+    log.error("Справочник %s не найден в папке %s и не скачан (%s). Положите папку refdata рядом со скриптом "
+              "(из репозитория https://github.com/ikotlov-ux/oozt-recs)", name, _REF_DIR, err)
+    return p
+
+
 # справочники Excel по умолчанию (поле Config → файл в refdata/)
 REF_DEFAULTS = {"water_ref": "Справочник_водоёмов_и_болот_ООЗТ_Москвы.xlsx",
                 "flowering_ref": "okhranyaemye_rasteniya_tsvetenie.xlsx"}
@@ -3089,8 +3183,10 @@ def _ref_path(key: str) -> Path | None:
     v = getattr(_CUR_CFG, key, None) if _CUR_CFG is not None else None
     if v and Path(str(v)).exists():
         return Path(str(v))
-    d = _REF_DIR / REF_DEFAULTS[key]
-    return d if (v is None or not str(v).strip()) and d.exists() else None
+    if v is not None and str(v).strip():
+        return None
+    d = _refdata_file(REF_DEFAULTS[key])
+    return d if d.exists() else None
 
 
 def _norm_latin(s) -> str:
@@ -3105,7 +3201,7 @@ def _load_ref(name: str, cols: list) -> dict:
     if name in _REF_CACHE:
         return _REF_CACHE[name]
     ref = {}
-    p = _REF_DIR / name
+    p = _refdata_file(name)
     try:
         df = pd.read_csv(p, encoding="utf-8-sig")
         for _, row in df.iterrows():
@@ -3169,7 +3265,7 @@ def synonym_groups() -> dict:
     if ck in _REF_CACHE:
         return _REF_CACHE[ck]
     pairs = list(SYNONYMS_DEFAULT)
-    p = _REF_DIR / "species_synonyms.csv"
+    p = _refdata_file("species_synonyms.csv")
     if p.exists():
         try:
             df = pd.read_csv(p, encoding="utf-8-sig")
@@ -3910,7 +4006,10 @@ def download_informal_trails_osm(bbox_wgs84, out_dir, kinds=("informal",), sourc
         log.warning("Тропы OSM: неизвестный источник «%s» — используется auto", source)
         source = "auto"
     bb = [float(x) for x in bbox_wgs84]
-    order = {"auto": ["overpass", "bbbike", "geofabrik"]}.get(source, [source])
+    chain = ["overpass", "bbbike", "geofabrik"]
+    # выбранный источник — первым; если он не сработал (сервер недоступен, файл .pbf не выбран),
+    # пробуются остальные, чтобы слой троп всё равно был создан
+    order = chain if source == "auto" else [source] + [x for x in chain if x != source]
     if source == "auto" and str(pbf or "").strip():
         order = ["pbf"] + order                  # указан свой файл — он первым
     log.info("Тропы OSM (%s): источник — %s", ", ".join(OSM_TRAIL_KIND_TITLE[k] for k in kinds),
@@ -3922,7 +4021,10 @@ def download_informal_trails_osm(bbox_wgs84, out_dir, kinds=("informal",), sourc
                 g = _osm_trails_overpass(bb, kinds)
             elif src == "pbf":
                 if not str(pbf or "").strip():
-                    log.warning("Тропы OSM: файл .osm.pbf не выбран")
+                    log.warning("Тропы OSM: файл .osm.pbf не выбран — пробую другие источники")
+                    continue
+                if not Path(str(pbf)).exists():
+                    log.warning("Тропы OSM: файл %s не найден — пробую другие источники", pbf)
                     continue
                 g = _osm_trails_pbf(pbf, bb, kinds)
             else:
@@ -3933,7 +4035,8 @@ def download_informal_trails_osm(bbox_wgs84, out_dir, kinds=("informal",), sourc
                 fp = _download_pbf(src, cache_dir, cache_days)
                 g = _osm_trails_pbf(fp, bb, kinds) if fp else None
         except Exception as e:
-            log.warning("Тропы OSM: источник «%s» — ошибка (%s)", OSM_SOURCES[src][0], e)
+            log.warning("Тропы OSM: источник «%s» — ошибка (%s)%s", OSM_SOURCES[src][0], e,
+                        " — пробую следующий" if src != order[-1] else "")
             g = None
         if g is not None:
             used = src
@@ -4028,11 +4131,30 @@ class Data:
         f = cfg.fields or {}
         # поле «Структурный класс» (I.7): копия до переименования полей; cfg.fields ниже перезаписывается
         f_struct = f.get(STRUCT_FIELD)
-        if f_struct and f_struct in g.columns:
-            g["Struct"] = g[f_struct].values
-        elif f_struct:
+        if f_struct and f_struct not in g.columns:
             log.warning("Поле «Структурный класс» «%s» не найдено в слое территории", f_struct)
             f_struct = None
+        # выбранное поле не содержит структурных классов (например, «Геоморфон»: водоразделы, склоны…) —
+        # берём стандартное поле структурного класса или коды class_value, если они есть в слое
+        s_cands = [c for c in STRUCT_FIELD_CANDS + ["class_value"] if c in g.columns]
+        if f_struct and struct_known_share(g[f_struct]) < 0.05:
+            alt = next((c for c in s_cands if c != f_struct and struct_known_share(g[c]) >= 0.5), None)
+            if alt:
+                log.warning("Поле «Структурный класс» «%s» не содержит структурных классов экосистем "
+                            "(значения: %s) — используется поле «%s»", f_struct,
+                            ", ".join(map(str, g[f_struct].dropna().astype(str).unique()[:5])), alt)
+                f_struct = alt
+            else:
+                log.warning("Поле «Структурный класс» «%s» не содержит структурных классов экосистем "
+                            "(значения: %s): мозаичное выкашивание (I.7) не будет назначено", f_struct,
+                            ", ".join(map(str, g[f_struct].dropna().astype(str).unique()[:5])))
+        elif not f_struct:
+            alt = next((c for c in s_cands if struct_known_share(g[c]) >= 0.5), None)
+            if alt:
+                log.info("Поле «Структурный класс» не выбрано — используется поле «%s»", alt)
+                f_struct = alt
+        if f_struct:
+            g["Struct"] = g[f_struct].values
         cols = list(g.columns)
 
         def pick(key, candidates, required=True):
@@ -4112,6 +4234,18 @@ class Data:
             g["Struct"] = g["Struct"].map(struct_class_of)
             log.info("Структурный класс — поле «%s»: %s", f_struct, ", ".join(
                 f"{k} — {v}" for k, v in g["Struct"].value_counts().head(12).items()))
+            # поле типа без слов «лесные / луговые / водные / околоводные» (например, «Тип» нового слоя
+            # экосистем: «Елово-лиственные», «Бурьянистые») — правила по типу ничего бы не нашли;
+            # укрупнённый тип берётся из структурного класса, подробный тип остаётся в названии
+            rec = float(g["Type"].map(type_recognized).mean()) if len(g) else 1.0
+            broad = g["Struct"].map(broad_type_of_struct)
+            ok = broad != ""
+            if rec < 0.5 and len(g) and float(ok.mean()) >= 0.5:
+                log.warning("Поле типа «%s»: типы, по которым работают правила (лесные, луговые, водные, "
+                            "околоводные), распознаны только у %.0f%% полигонов — тип полигона определяется по "
+                            "структурному классу «%s» (подробный тип сохранён в названии)",
+                            cfg.fields.get("TYPE") or "?", 100 * rec, f_struct)
+                g.loc[ok, "Type"] = broad[ok]
         else:
             g["Struct"] = ""
         g["uid"] = g["OOZT"].astype(str) + "|" + g["KV"].astype(str) + "|" + g["VYD"].astype(str)
@@ -5398,6 +5532,14 @@ def select_species(data: Data, p: dict):
         if pts is None and DIAG.cur is not None:
             t_ = "из них подходящих мероприятию (точки: %s)" % _sel_txt(p)
             DIAG.cur["steps"].append((t_ if len(t_) <= 160 else t_[:157] + "…", 0, {}))
+        if p.get("kk_categories") and data.sp_points is not None and DIAG.cur is not None:
+            kk_n = int(data.sp_points["kk_cat"].notna().sum()) if "kk_cat" in data.sp_points.columns else 0
+            if not kk_ref():
+                DIAG.cur["steps"].append(("! справочник Красной книги refdata/kk_moscow.csv не загружен — "
+                                          "категории КК не определены", 0, {}))
+            elif kk_n == 0:
+                DIAG.cur["steps"].append(("! ни один вид в слоях не найден в Красной книге Москвы "
+                                          "(проверьте поле с латинскими названиями)", 0, {}))
     if _uses(p, "polygons"):
         DIAG.step("находок видов в загруженных слоях (полигоны)", data.sp_polys)
         DIAG.step("из них подходящих мероприятию (полигоны)", polys)
