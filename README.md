@@ -180,8 +180,9 @@ python oozt_recs.py --config config_local.json --no-basemap
 # окно прогресса и при запуске с --config (после окна выбора данных оно открывается всегда; --no-progress — выключить)
 python oozt_recs.py --config config_local.json --progress
 
-# в Jupyter: вставьте весь файл в одну ячейку — автозапуска не будет; затем
-cfg = Config.load("config_local.json"); run(cfg)      # или main()
+# в Jupyter: вставьте весь файл в одну ячейку (или %run oozt_recs.py) — автозапуска не будет; затем
+main()          # окна и расчёт идут в отдельном процессе, журнал выводится в ячейку; ядро не падает, перезапуск не нужен
+cfg = Config.load("config_local.json"); run(cfg)      # без окон, расчёт прямо в ядре
 
 # форматы отчёта (по умолчанию docx,pdf; doc — Word 97–2003; пусто — только Markdown)
 python oozt_recs.py --config config_local.json --report-only --formats docx,pdf,doc

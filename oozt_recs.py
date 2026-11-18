@@ -54,11 +54,19 @@ from pathlib import Path
 from typing import Iterable
 
 # ---- локальная папка pylib рядом со скриптом (чистые Python-пакеты: openpyxl, contextily, python-docx) ----
-# Jupyter: __file__ не определён — используем текущую папку ноутбука
-try:
-    _pylib = Path(__file__).resolve().parent / "pylib"
-except NameError:
-    _pylib = Path.cwd() / "pylib"
+# Jupyter: __file__ не определён — используем текущую папку ноутбука; при запуске из Jupyter в отдельном
+# процессе (main() в ячейке) папка ноутбука передаётся через OOZT_BASE_DIR
+def _script_dir() -> Path:
+    env = os.environ.get("OOZT_BASE_DIR", "").strip()
+    if env:
+        return Path(env)
+    try:
+        return Path(__file__).resolve().parent
+    except NameError:
+        return Path.cwd()
+
+
+_pylib = _script_dir() / "pylib"
 if _pylib.is_dir() and str(_pylib) not in sys.path:
     sys.path.append(str(_pylib))          # append: пакеты окружения имеют приоритет
 
@@ -3378,10 +3386,7 @@ def _part_ids(ids: pd.Series, g: gpd.GeoDataFrame) -> pd.Series:
 # =====================================================================================
 #        СПРАВОЧНИКИ: КРАСНАЯ КНИГА МОСКВЫ, ИНВАЗИВНЫЕ ВИДЫ, ГРУНТОВЫЕ ДОРОГИ И ТРОПЫ OSM
 # =====================================================================================
-try:
-    _REF_DIR = Path(__file__).resolve().parent / "refdata"
-except NameError:                        # Jupyter: __file__ не определён
-    _REF_DIR = Path.cwd() / "refdata"
+_REF_DIR = _script_dir() / "refdata"     # Jupyter: папка ноутбука (см. _script_dir)
 # последняя конфигурация окна (автосохранение при запуске расчёта и при закрытии окна)
 LAST_CFG_PATH = _REF_DIR.parent / "oozt_recs_last.json"
 _REF_CACHE: dict = {}
@@ -4228,7 +4233,7 @@ def _osm_trails_pbf(path, bbox_wgs84, kinds):
 
 
 def _osm_cache_dir(cache_dir="") -> Path:
-    d = Path(cache_dir) if str(cache_dir or "").strip() else Path(__file__).resolve().parent / "osm_cache"
+    d = Path(cache_dir) if str(cache_dir or "").strip() else _script_dir() / "osm_cache"
     d.mkdir(parents=True, exist_ok=True)
     return d
 
@@ -10536,7 +10541,54 @@ def _run_with_args(args, ap):
         fn()
 
 
+def _in_jupyter_kernel() -> bool:
+    """Код выполняется в ядре Jupyter / IPython (ячейка, %run или import из ноутбука)."""
+    try:
+        ip = get_ipython()                # noqa: F821 — определён только в IPython
+    except NameError:
+        return False
+    return ip is not None and getattr(ip, "kernel", None) is not None
+
+
+def _main_in_subprocess() -> int:
+    """main() из ноутбука: окна tkinter и расчёт — в отдельном процессе Python.
+
+    tkinter в ядре Jupyter ненадёжен: после окна выбора данных и окна хода расчёта (поток расчёта)
+    объекты Tk, удалённые сборщиком мусора не в том потоке, роняют ядро («kernel died») —
+    приходилось перезапускать блокнот. Отдельный процесс завершается вместе с окнами, ядро не страдает.
+    Журнал процесса построчно выводится в ячейку."""
+    import subprocess
+    try:
+        script = Path(__file__).resolve()
+    except NameError:                     # код вставлен в ячейку: берём текст ячейки из кэша IPython
+        import linecache
+        src = "".join(linecache.getlines(main.__code__.co_filename))
+        if "def _main_in_subprocess" not in src:
+            raise RuntimeError("Не удалось получить текст скрипта из ячейки. Запустите скрипт из файла: "
+                               "%run oozt_recs.py  или  !python oozt_recs.py")
+        script = Path(tempfile.gettempdir()) / "oozt_recs_jupyter.py"
+        script.write_text(src, encoding="utf-8")
+    env = dict(os.environ, OOZT_BASE_DIR=str(_script_dir()), PYTHONIOENCODING="utf-8", PYTHONUNBUFFERED="1",
+               MPLBACKEND="Agg")
+    env.pop("JPY_PARENT_PID", None)
+    cmd = [sys.executable, str(script)] + _clean_argv()
+    print("Запуск в отдельном процессе (ядро Jupyter не падает при закрытии окон):", " ".join(cmd[1:]))
+    sys.stdout.flush()
+    pr = subprocess.Popen(cmd, cwd=str(Path.cwd()), env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                          text=True, encoding="utf-8", errors="replace", bufsize=1)
+    try:
+        for line in pr.stdout:
+            print(line, end="")
+        return pr.wait()
+    except KeyboardInterrupt:             # «Остановить ядро» в Jupyter — останавливаем и расчёт
+        pr.terminate()
+        print("Расчёт прерван.")
+        return 1
+
+
 def main():
+    if _in_jupyter_kernel() and not os.environ.get("OOZT_BASE_DIR"):
+        return _main_in_subprocess()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)-5s %(message)s",
                         datefmt="%H:%M:%S")
     ap = _build_parser()
