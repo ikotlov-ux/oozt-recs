@@ -334,7 +334,7 @@ STRUCT_CODE_CLASSES = {
     231: "Гидроморфные луга", 232: "Гидроморфные луга", 233: "Гидроморфные луга",
     310: "Болота", 400: "Вода", 501: "Антропогенные", 503: "Антропогенные",
 }
-# CAPEX-1-1/1-2 «Мозаичное выкашивание»: косим все луга, включая бурьян (222); гидроморфные луга (231–233) не косим
+# 1.1/1.2 «Мозаичное выкашивание»: косим все луга, включая бурьян (222); гидроморфные луга (231–233) не косим
 STRUCT_MOW_DEFAULT = ("Суходольные луга", "Мезофитные луга", "Мезофитные луга (антропогенные)")
 
 
@@ -440,13 +440,13 @@ class Config:
     roads_dirt: list[str] = field(default_factory=list)   # грунтовые дороги: «Колокольчик», карты
     hydro_lines: list[str] = field(default_factory=list)
     hydro_polys: list[str] = field(default_factory=list)
-    drainage: list[str] = field(default_factory=list)    # дренажные канавы (линии) — мероприятие CAPEX-2-3 и слой рек
-    wetlands: list[str] = field(default_factory=list)    # болота (полигоны) — мероприятие CAPEX-1-3
+    drainage: list[str] = field(default_factory=list)    # дренажные канавы (линии) — мероприятие 2.3 и слой рек
+    wetlands: list[str] = field(default_factory=list)    # болота (полигоны) — мероприятие 1.3
     recreation: list[str] = field(default_factory=list)   # рекреационные объекты (точки) — тепловая карта на схемах
     lesopat_points: list[str] = field(default_factory=list)  # лесопатология: ПВН (Excel или вектор с категорией)
-    # справочник водоёмов и болот ООЗТ (Excel; отметки мероприятий CAPEX-1-3, 1-4, 1-5, 3-5); пусто — refdata/
+    # справочник водоёмов и болот ООЗТ (Excel; отметки мероприятий 1.3, 1.4, 1.5, 3.5); пусто — refdata/
     water_ref: str | None = None
-    # справочник цветения охраняемых растений (Excel; сроки CAPEX-3-2 и синонимы); пусто — refdata/
+    # справочник цветения охраняемых растений (Excel; сроки 3.2 и синонимы); пусто — refdata/
     flowering_ref: str | None = None
     # слои видов и редких экосистем: [{path, category, group, kind, field}], см. SPECIES_*
     species_layers: list = field(default_factory=list)
@@ -456,13 +456,13 @@ class Config:
     min_share_pct: float = 25.0          # мин. доля полигона под участком-основанием (тропы, уклон, вороны, SDM), %
     split_multipart: bool = True         # многочастный объект → отдельные контуры (ID-1, ID-2, …)
     # ---- параметры мероприятий (окно скрипта, раздел «Параметры мероприятий»; общие для всех ООЗТ)
-    i3_thr_mode: str = "quantile"        # CAPEX-2-1: порог плотности троп в окне 250 м — quantile | value
-    i3_quantile: float = 0.90            # CAPEX-2-1: квантиль по ячейкам окна внутри каждой ООЗТ
-    i3_value_m_ha: float = 250.0         # CAPEX-2-1: порог-значение, м/га (при i3_thr_mode = value)
-    rare_trail_m_ha: float = 100.0       # CAPEX-3-1/3-2: порог плотности грунтовых дорог и троп в выделе, м/га
-    mow_q1_min_ha: float | None = 1.0    # CAPEX-1-1: выкашивание 1 очереди — луга от … га (включительно)
-    mow_q1_max_ha: float | None = 5.0    # CAPEX-1-1: … до … га включительно; крупнее — 2 очередь (CAPEX-1-2)
-    reintro_min_ha: float = 2.0          # CAPEX-2-4: реинтродукция — только участки крупнее, га
+    i3_thr_mode: str = "quantile"        # 2.1: порог плотности троп в окне 250 м — quantile | value
+    i3_quantile: float = 0.90            # 2.1: квантиль по ячейкам окна внутри каждой ООЗТ
+    i3_value_m_ha: float = 250.0         # 2.1: порог-значение, м/га (при i3_thr_mode = value)
+    rare_trail_m_ha: float = 100.0       # 3.1/3.2: порог плотности грунтовых дорог и троп в выделе, м/га
+    mow_q1_min_ha: float | None = 1.0    # 1.1: выкашивание 1 очереди — луга от … га (включительно)
+    mow_q1_max_ha: float | None = 5.0    # 1.1: … до … га включительно; крупнее — 2 очередь (1.2)
+    reintro_min_ha: float = 2.0          # 2.4: реинтродукция — только участки крупнее, га
     report_formats: list = field(default_factory=lambda: ["docx", "pdf"])  # docx, pdf, doc; report.md — всегда
     fields: dict = field(default_factory=dict)      # kv_vyd: OOZT, KV, VYD, TYPE, NAME; eco: ID, TYPE, NAME, OOZT
 
@@ -546,24 +546,24 @@ LAYER_SPECS = [
               "справочник «ООЗТ — водоём — тип — площадь»"),
     dict(key="drainage", title="Дренажные канавы", multi=True, kind="vec",
          what="линии; добавляются к рекам на картах и включают мероприятие "
-              "«Прочистка дренажной системы» (CAPEX-2-3)"),
+              "«Прочистка дренажной системы» (2.3)"),
     dict(key="wetlands", title="Болота (вектор)", multi=True, kind="vec",
          what="полигоны болот/заболоченных участков — для мероприятия "
-              "«Частичное удаление деревьев и кустарников на болотах» (CAPEX-1-3)"),
+              "«Частичное удаление деревьев и кустарников на болотах» (1.3)"),
     dict(key="recreation", title="Рекреационные объекты (точки)", multi=True, kind="vec",
          what="точки (площадки, навесы, беседки, инфраструктура отдыха) — тепловая карта "
               "концентрации на схемах кварталов; поле категории объекта, если есть"),
     dict(key="water_ref", title="Справочник водоёмов и болот (Excel)", multi=False, kind="xls",
          what="лист «Битца и Измайлово» / «Все ООЗТ Москвы»: объекты с координатами и отметками "
-              "мероприятий CAPEX-1-3, CAPEX-1-4, CAPEX-1-5, CAPEX-3-5 (1 / да / + / ●); по умолчанию — refdata/"
+              "мероприятий 1.3, 1.4, 1.5, 3.5 (1 / да / + / ●); по умолчанию — refdata/"
               "Справочник_водоёмов_и_болот_ООЗТ_Москвы.xlsx"),
     dict(key="flowering_ref", title="Справочник цветения охраняемых растений (Excel)", multi=False, kind="xls",
          what="лист «Справочник»: латинские названия (в слое и по Красной книге — синонимы), месяцы "
-              "цветения IV–IX (●) — сроки CAPEX-3-2; по умолчанию — refdata/okhranyaemye_rasteniya_tsvetenie.xlsx"),
+              "цветения IV–IX (●) — сроки 3.2; по умолчанию — refdata/okhranyaemye_rasteniya_tsvetenie.xlsx"),
     dict(key="lesopat_points", title="Лесопатология: ПВН (точки)", multi=True, kind="vec_xls",
          what="Excel с описаниями ПВН (PVN_…xlsx: «№ ПВН», «Рекомендации», «Широта/Долгота») "
               "либо векторный слой (.gpkg, .shp) с полями «Рекомендации» / «recomend*» или «Категория». "
-              "Мероприятия OPEX-4-1 … OPEX-4-6 назначаются по этим точкам"),
+              "Мероприятия 4.1 … 4.6 назначаются по этим точкам"),
 ]
 LAYER_TITLE = {s["key"]: s["title"] for s in LAYER_SPECS}
 LAYER_TITLE["species"] = "Слои видов и редких экосистем"
@@ -655,9 +655,10 @@ def species_layer_label(l: dict) -> str:
 
 
 # ---- коды мероприятий ------------------------------------------------------------------
-# Классификация «CAPEX / OPEX»: базовая группа — группа мероприятий (сквозная нумерация 1–5) —
-# мероприятие (нумерация в группе с 1): «CAPEX-1-1», «OPEX-4-1». Прежние римские коды (I.7, III.3…)
-# понимаются как синонимы — старые таблицы, справочники и конфигурации продолжают работать.
+# Нумерация мероприятий: группа мероприятий (сквозная нумерация 1–5) — мероприятие (нумерация в группе
+# с 1): «1.1», «4.1». Группы 1–3 относятся к капитальным мероприятиям (CAPEX), 4–5 — к операционным (OPEX);
+# базовая группа выводится отдельным столбцом сводок, в номер не входит. Прежние коды (римские I.7, III.3…
+# и «CAPEX-1-1», «OPEX-4-1») понимаются как синонимы — старые таблицы, справочники и конфигурации работают.
 BASE_GROUPS = {"CAPEX": "CAPEX — капитальные мероприятия", "OPEX": "OPEX — операционные мероприятия"}
 MEASURE_GROUPS = {
     1: ("CAPEX", "1. Поддержание природных сообществ"),
@@ -667,24 +668,29 @@ MEASURE_GROUPS = {
     5: ("OPEX", "5. Рекреационное обустройство и обеспечение безопасности посетителей"),
 }
 CODE_ALIASES = {
-    "I.7": "CAPEX-1-1", "I.8": "CAPEX-1-3", "III.7": "CAPEX-1-4", "I.9": "CAPEX-1-5", "I.6": "CAPEX-1-6",
-    "I.3": "CAPEX-2-1", "II.1": "CAPEX-2-2", "III.8": "CAPEX-2-3", "I.12": "CAPEX-2-4", "II.2": "CAPEX-2-5",
-    "I.2": "CAPEX-2-6",
-    "III.3": "CAPEX-3-1", "III.4": "CAPEX-3-2", "III.5": "CAPEX-3-3", "I.10": "CAPEX-3-4", "I.11": "CAPEX-3-5",
-    "III.2": "CAPEX-3-6", "III.6": "CAPEX-3-8",
-    "V.1": "OPEX-4-1", "V.2": "OPEX-4-2", "V.3": "OPEX-4-3", "V.4": "OPEX-4-4", "V.5": "OPEX-4-5",
-    "V.6": "OPEX-4-6", "I.1": "OPEX-4-7",
-    "IV.1": "OPEX-5-2", "IV.5": "OPEX-5-3", "IV.4": "OPEX-5-4", "IV.6": "OPEX-5-5", "III.9": "OPEX-5-7",
-    "IV.2": "OPEX-5-8", "IV.3": "OPEX-5-9",
+    "I.7": "1.1", "I.8": "1.3", "III.7": "1.4", "I.9": "1.5", "I.6": "1.6",
+    "I.3": "2.1", "II.1": "2.2", "III.8": "2.3", "I.12": "2.4", "II.2": "2.5",
+    "I.2": "2.6",
+    "III.3": "3.1", "III.4": "3.2", "III.5": "3.3", "I.10": "3.4", "I.11": "3.5",
+    "III.2": "3.6", "III.6": "3.8",
+    "V.1": "4.1", "V.2": "4.2", "V.3": "4.3", "V.4": "4.4", "V.5": "4.5",
+    "V.6": "4.6", "I.1": "4.7",
+    "IV.1": "5.2", "IV.5": "5.3", "IV.4": "5.4", "IV.6": "5.5", "III.9": "5.7",
+    "IV.2": "5.8", "IV.3": "5.9",
 }
-CODE_RE_TXT = r"(?:CAPEX|OPEX)-\d+-\d+|[IVX]+\.\d+"
-_NEW_CODE_RE = re.compile(r"^(CAPEX|OPEX)-(\d+)-(\d+)$")
+CODE_RE_TXT = r"(?:CAPEX|OPEX)-\d+-\d+|[1-5]\.\d{1,2}|[IVX]+\.\d+"
+_NEW_CODE_RE = re.compile(r"^([1-5])\.(\d{1,2})$")
+_PREFIXED_CODE_RE = re.compile(r"^(?:CAPEX|OPEX)-?(\d+)[-.](\d+)$")
 
 
 def canon_code(code) -> str:
-    """Код мероприятия в новой нумерации: «III.3» → «CAPEX-3-1»; «capex-1-1» → «CAPEX-1-1»."""
-    t = re.sub(r"\s+", "", str(code or "")).upper().replace("–", "-").replace("—", "-")
-    return CODE_ALIASES.get(t, t)
+    """Код мероприятия в текущей нумерации: «III.3» → «3.1»; «CAPEX-1-1» → «1.1»; «1-1» → «1.1»."""
+    if isinstance(code, float) and not np.isnan(code):      # Excel превратил «1.1» в число
+        code = f"{code:.1f}" if round(code, 1) == code else str(code)
+    t = re.sub(r"\s+", "", str(code or "")).upper().replace("–", "-").replace("—", "-").rstrip(".")
+    t = CODE_ALIASES.get(t, t)
+    m = _PREFIXED_CODE_RE.match(t) or re.match(r"^([1-5])-(\d{1,2})$", t)
+    return f"{int(m.group(1))}.{int(m.group(2))}" if m else t
 
 
 def code_group(code) -> tuple[str, str]:
@@ -692,7 +698,7 @@ def code_group(code) -> tuple[str, str]:
     m = _NEW_CODE_RE.match(canon_code(code))
     if not m:
         return "", ""
-    base, title = MEASURE_GROUPS.get(int(m.group(2)), (m.group(1), ""))
+    base, title = MEASURE_GROUPS.get(int(m.group(1)), ("", ""))
     return BASE_GROUPS.get(base, base), title
 
 
@@ -770,7 +776,7 @@ RULES = {
         title="по справочнику водоёмов", data=["water_ref"], opt=["hydro", "wetlands"],
         params=dict(),
         help="Объекты берутся из справочника водоёмов и болот ООЗТ (Excel): строки с отметкой в столбце "
-             "кода мероприятия (CAPEX-1-3, CAPEX-1-4, CAPEX-1-5, CAPEX-3-5; прежние коды I.8, III.7, I.9, I.11 тоже понимаются; отметка — 1, да, + или ●). Точка объекта (широта, "
+             "кода мероприятия (1.3, 1.4, 1.5, 3.5; прежние коды I.8, III.7, I.9, I.11 тоже понимаются; отметка — 1, да, + или ●). Точка объекта (широта, "
              "долгота WGS 84) привязывается к контуру: водоём — к полигону гидрографии, болото — к слою болот "
              "(если нет — к гидрографии); сначала полигон, содержащий точку, затем ближайший не дальше 30 м. "
              "ООЗТ и квартал определяются по геометрии (повторяющиеся номера кварталов Терлецкого массива "
@@ -886,7 +892,7 @@ SPEC_TITLE.update({
     "mow_lo_ha": "Площадь луга от, га", "mow_hi_ha": "Площадь луга до, га",
     "min_patch_ha": "Участки крупнее, га",
 })
-I3_WINDOW_M = 250.0             # CAPEX-2-1: сторона квадратного окна плотности троп, м
+I3_WINDOW_M = 250.0             # 2.1: сторона квадратного окна плотности троп, м
 DESC_COLUMN = "Процедура назначения (как работает скрипт)"
 
 TYPE_WORDS = [("околовод", "околовод"), ("болот", "болот"), ("водн", "водн"), ("вод", "водн"),
@@ -1719,7 +1725,7 @@ VEC_XLS_TYPES = [
 JSON_TYPES = [("Конфигурация", "*.json"), ("Все файлы", "*.*")]
 NONE_FIELD = "— нет —"
 
-# поле «Структурный класс» — тип полигона для правил и мозаичное выкашивание CAPEX-1-1/1-2 (одно поле окна);
+# поле «Структурный класс» — тип полигона для правил и мозаичное выкашивание 1.1/1.2 (одно поле окна);
 # ключ STRUCT — из прежних конфигураций (отдельное поле структурного класса), понимается при загрузке
 STRUCT_FIELD = "STRUCT"
 STRUCT_FIELD_CANDS = ["Структурный класс", "Структурный_класс", "Struct_class", "STRUCT"]
@@ -1976,7 +1982,7 @@ class SetupWindow:
         s3.pack(fill="x", pady=(0, 8))
         ttk.Label(s3, foreground=self.C_MUTED, font=self.f_small, wraplength=700, justify="left",
                   text="✔ — слой выбран;  ! — нужен включённым мероприятиям, но не выбран;  ○ — не используется "
-                       "включёнными мероприятиями. Коды мероприятий — по таблице (колонка с номерами CAPEX-1-1, OPEX-4-1…).",
+                       "включёнными мероприятиями. Коды мероприятий — по таблице (колонка с номерами 1.1, 4.1…).",
                   ).pack(anchor="w", pady=(0, 4))
         for spec in LAYER_SPECS:
             self._layer_row(s3, spec)
@@ -2105,8 +2111,8 @@ class SetupWindow:
             e.bind("<Return>", upd)
             return e
         small = dict(foreground=self.C_MUTED, font=self.f_small, wraplength=640, justify="left")
-        # CAPEX-2-1
-        ttk.Label(s, text="CAPEX-2-1 — плотность троп в окне 250 × 250 м; порог плотности:",
+        # 2.1
+        ttk.Label(s, text="2.1 — плотность троп в окне 250 × 250 м; порог плотности:",
                   font=self.f_bold).pack(anchor="w")
         self.v_i3_mode = tk.StringVar(value="quantile")
         self.v_i3_q = tk.StringVar(value="0,90")
@@ -2118,15 +2124,15 @@ class SetupWindow:
         ttk.Radiobutton(r, text="значение", value="value", variable=self.v_i3_mode, command=upd).pack(side="left")
         ent(r, self.v_i3_val, 6)
         ttk.Label(r, text="м/га").pack(side="left")
-        # CAPEX-3-1 / 3-2
+        # 3.1 / 3.2
         r = ttk.Frame(s); r.pack(fill="x", pady=(8, 0))
-        ttk.Label(r, text="CAPEX-3-1, 3-2 — грунтовые дороги и тропы в выделе: плотность не менее",
+        ttk.Label(r, text="3.1, 3.2 — грунтовые дороги и тропы в выделе: плотность не менее",
                   font=self.f_bold).pack(side="left")
         self.v_rare_thr = tk.StringVar(value="100")
         ent(r, self.v_rare_thr, 6)
         ttk.Label(r, text="м/га").pack(side="left")
-        # CAPEX-1-1 / 1-2
-        ttk.Label(s, text="CAPEX-1-1 — Регулируемое мозаичное выкашивание 1 очереди (небольших выделов)",
+        # 1.1 / 1.2
+        ttk.Label(s, text="1.1 — Регулируемое мозаичное выкашивание 1 очереди (небольших выделов)",
                   font=self.f_bold).pack(anchor="w", pady=(8, 0))
         r = ttk.Frame(s); r.pack(fill="x", padx=(12, 0))
         self.v_mow_lo, self.v_mow_hi = tk.StringVar(value="1"), tk.StringVar(value="5")
@@ -2135,13 +2141,13 @@ class SetupWindow:
         ttk.Label(r, text="до").pack(side="left")
         ent(r, self.v_mow_hi, 5)
         ttk.Label(r, text="га включительно").pack(side="left")
-        ttk.Label(s, text="CAPEX-1-2 «Регулируемое мозаичное выкашивание 2 очереди (крупных участков)» формируется "
+        ttk.Label(s, text="1.2 «Регулируемое мозаичное выкашивание 2 очереди (крупных участков)» формируется "
                           "автоматически для выделов крупнее верхней границы. Пустое «от» — без нижней границы; "
                           "пустое «до» — 1 очередь без верхней границы, 2 очередь не формируется.",
                   **small).pack(anchor="w", padx=(12, 0))
-        # CAPEX-2-4
+        # 2.4
         r = ttk.Frame(s); r.pack(fill="x", pady=(8, 0))
-        ttk.Label(r, text="CAPEX-2-4 — Колокольчик: участки крупнее", font=self.f_bold).pack(side="left")
+        ttk.Label(r, text="2.4 — Колокольчик: участки крупнее", font=self.f_bold).pack(side="left")
         self.v_reintro = tk.StringVar(value="2")
         ent(r, self.v_reintro, 5)
         ttk.Label(r, text="га").pack(side="left")
@@ -2948,9 +2954,9 @@ class SetupWindow:
 
 
 def _code_key(code: str):
-    """Сортировка кодов «CAPEX-1-1» … «OPEX-5-9»: группа, затем номер (старые коды — через синонимы)."""
+    """Сортировка кодов «1.1» … «5.9»: группа, затем номер (старые коды — через синонимы)."""
     mt = _NEW_CODE_RE.match(canon_code(code))
-    return (int(mt.group(2)), int(mt.group(3))) if mt else (99, 0)
+    return (int(mt.group(1)), int(mt.group(2))) if mt else (99, 0)
 
 
 def gui_collect_config(cfg: Config | None = None) -> Config:
@@ -3387,7 +3393,7 @@ def _refdata_file(name: str) -> Path:
     """Файл справочника из папки refdata/ рядом со скриптом. Если папки или файла нет (скопирован только
     oozt_recs.py), файл один раз скачивается из репозитория скрипта в refdata/ (или во временную папку,
     если рядом со скриптом нельзя писать). Без справочника kk_moscow.csv категории Красной книги не
-    определяются и правила по КК (CAPEX-3-1, CAPEX-3-2) ничего не находят."""
+    определяются и правила по КК (3.1, 3.2) ничего не находят."""
     p = _REF_DIR / name
     if p.exists():
         return p
@@ -3628,7 +3634,7 @@ def flowering_ref() -> dict:
     res = {"months": {}, "pairs": [], "kk": {}, "path": None}
     _REF_CACHE[ck] = res
     if p is None:
-        log.warning("Справочник цветения не найден — сроки CAPEX-3-2 по цветению и синонимы из него недоступны")
+        log.warning("Справочник цветения не найден — сроки 3.2 по цветению и синонимы из него недоступны")
         return res
     try:
         import openpyxl
@@ -3702,7 +3708,7 @@ def _wr_mark(v) -> bool:
 def read_water_ref(path) -> pd.DataFrame:
     """Справочник водоёмов и болот ООЗТ → таблица объектов с отметками мероприятий.
     Читаются листы «Битца и Измайлово» и «Все ООЗТ Москвы» («Сводка» — нет); заголовок — строка с «№ п/п»;
-    столбцы — по началу названия (без учёта регистра и ё/е), мероприятия — по коду в заголовке («CAPEX-1-5 …»; прежние «I.9 …» — синонимы).
+    столбцы — по началу названия (без учёта регистра и ё/е), мероприятия — по коду в заголовке («1.5 …»; прежние «I.9 …» — синонимы).
     Строки «ИТОГО» и без координат пропускаются; дубли (ООЗТ + квартал + название) объединяются по ИЛИ."""
     import openpyxl
     key = ("_wref", str(path), os.path.getmtime(path) if os.path.exists(path) else 0)
@@ -3802,7 +3808,7 @@ def invasive_ref() -> dict:
 
 
 INVASIVE_REF_TAXON = "@invasive_ref"      # «Виды: таксоны» = «по справочнику»: все инвазивные виды справочника
-INVASIVE_REF_EXCLUDE = ("heracleum sosnowskyi",)   # … кроме борщевика (отдельное мероприятие CAPEX-2-2)
+INVASIVE_REF_EXCLUDE = ("heracleum sosnowskyi",)   # … кроме борщевика (отдельное мероприятие 2.2)
 
 
 def invasive_group(species):
@@ -4420,7 +4426,7 @@ class Data:
                 f_struct = alt
             else:
                 log.warning("Поле «Структурный класс» «%s» не содержит структурных классов экосистем "
-                            "(значения: %s): мозаичное выкашивание (CAPEX-1-1/1-2) не будет назначено", f_struct,
+                            "(значения: %s): мозаичное выкашивание (1.1/1.2) не будет назначено", f_struct,
                             ", ".join(map(str, g[f_struct].dropna().astype(str).unique()[:5])))
         elif not f_struct:
             alt = next((c for c in s_cands if struct_known_share(g[c]) >= 0.5), None)
@@ -5937,7 +5943,7 @@ def rule_species_trails(data: Data, res: Results, measure: dict, p: dict):
         else:
             log.warning("  слой грунтовых дорог и троп не загружен — используется вся дорожно-тропиночная сеть")
     target = _target(data, p)
-    # ограничение по площади выдела (например, CAPEX-3-1 — > 5 га, CAPEX-3-2 — ≤ 5 га)
+    # ограничение по площади выдела (например, 3.1 — > 5 га, 3.2 — ≤ 5 га)
     amin, amax = p.get("vydel_min_ha"), p.get("vydel_max_ha")
     area_txt = ""
     if amin is not None or amax is not None:
@@ -6250,7 +6256,7 @@ def pond_polys(data) -> gpd.GeoDataFrame | None:
 WETLAND_COLOR = "#B4D796"     # болота на подложке схем (бледно-зелёный, RGB 180 215 150)
 
 
-# ---- CAPEX-1-3, 1-4, 1-5, 3-5: объекты справочника водоёмов и болот ----------------------------
+# ---- 1.3, 1.4, 1.5, 3.5: объекты справочника водоёмов и болот ----------------------------
 def _wr_find_polygon(pt, layers):
     """Контур для точки: полигон, содержащий точку (наименьший), иначе ближайший ≤ WATER_REF_SNAP_M."""
     for L in layers:
@@ -6318,9 +6324,9 @@ def rule_water_ref(data: Data, res: Results, measure: dict, p: dict):
     for _, o in pts.iterrows():
         is_bog = _norm_txt(o["cat"]).startswith("болот") or _norm_txt(o["otype"]).startswith("болот")
         lbl = f"«{o['name']}» ({o['oozt']}, кв. {o['kv'] or '—'}; лист «{o['sheet']}», строка {o['row']})"
-        if code == "CAPEX-1-3" and not is_bog:
+        if code == "1.3" and not is_bog:
             log.warning("  %s: непрофильная категория «%s» для %s (ожидается болото)", lbl, o["cat"] or "—", code)
-        if code in ("CAPEX-1-5", "CAPEX-3-5", "CAPEX-1-4") and is_bog:
+        if code in ("1.5", "3.5", "1.4") and is_bog:
             log.warning("  %s: непрофильная категория «Болото» для %s", lbl, code)
         layers = [wl, hp] if is_bog else [hp]
         L, idx, dist = _wr_find_polygon(o.geometry, layers)
@@ -6410,7 +6416,7 @@ def rule_water_ref(data: Data, res: Results, measure: dict, p: dict):
     _wr_write_unmatched(data)
 
 
-# ---- CAPEX-1-1 / CAPEX-1-2: мозаичное выкашивание по структурному классу ----------------------------------------
+# ---- 1.1 / 1.2: мозаичное выкашивание по структурному классу ----------------------------------------
 def rule_struct_class(data: Data, res: Results, measure: dict, p: dict):
     """Полигоны заданных структурных классов; участок работ — полигон экосистемы ∩ ООЗТ.
     «Очередь выкашивания»: 1 — площадь от … до … га включительно, 2 — крупнее верхней границы
@@ -6456,7 +6462,7 @@ def rule_struct_class(data: Data, res: Results, measure: dict, p: dict):
              f"; по площади не подходят — {n_skip}" if queue else "")
 
 
-# ---- CAPEX-3-1 / CAPEX-3-2: грунтовые дороги и тропы в выделах с видами Красной книги ---------------------------
+# ---- 3.1 / 3.2: грунтовые дороги и тропы в выделах с видами Красной книги ---------------------------
 def rule_rare_trail_vydel(data: Data, res: Results, measure: dict, p: dict):
     """Выделы с плотностью грунтовых дорог и троп > порога и находками видов КК Москвы заданных категорий."""
     trails = data.trails_informal if p.get("informal_only", True) else data.trails
